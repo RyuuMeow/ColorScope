@@ -1,0 +1,119 @@
+/* ===========================
+   Toolbar
+   =========================== */
+
+.toolbar {
+  width: var(--toolbar-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  gap: 2px;
+  z-index: 50;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: background var(--transition-normal), border-color var(--transition-normal);
+}
+
+.toolbar-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 0 6px;
+}
+
+.toolbar-divider {
+  width: 36px;
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 6px 0;
+  flex-shrink: 0;
+}
+
+.tool-btn {
+  position: relative;
+  width: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 4px 5px;
+  border-radius: var(--radius-md);
+  color: var(--text-tertiary);
+  transition: all var(--transition-fast);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tool-btn svg {
+  flex-shrink: 0;
+}
+
+.tool-label {
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.tool-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+.tool-btn.active {
+  color: var(--accent);
+  background: var(--accent-glow);
+}
+
+.tool-btn.filter-active {
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.12);
+}
+
+/* Tooltip */
+.tool-btn::after {
+  content: attr(title);
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%) scale(0.9);
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: all var(--transition-fast);
+  z-index: 100;
+  box-shadow: var(--shadow-md);
+}
+
+.tool-btn:hover::after {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
+}
+
+/* Mobile: hide tooltips, show compact */
+@media (max-width: 768px) {
+  .tool-btn::after {
+    display: none;
+  }
+  .tool-btn {
+    width: 40px;
+    padding: 6px 2px 4px;
+  }
+  .tool-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+}

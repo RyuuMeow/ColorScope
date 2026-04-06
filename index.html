@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-TW" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>ColorScope — 色彩分析工具</title>
+  <meta name="description" content="為繪師設計的色彩分析工具，導入圖片分析色系、放置顏色圖釘、比較明度差異。" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/styles/index.css" />
+  <link rel="stylesheet" href="/src/styles/canvas.css" />
+  <link rel="stylesheet" href="/src/styles/toolbar.css" />
+  <link rel="stylesheet" href="/src/styles/panels.css" />
+  <link rel="stylesheet" href="/src/styles/animations.css" />
+</head>
+<body>
+
+  <!-- ===== Home Page (scrollable with gallery below) ===== -->
+  <div id="home-page" class="home-page">
+    <section class="home-hero">
+      <div class="upload-logo">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <circle cx="24" cy="24" r="22" stroke="url(#logo-grad)" stroke-width="2.5" fill="none"/>
+          <circle cx="18" cy="20" r="6" fill="url(#logo-grad)" opacity="0.8"/>
+          <circle cx="30" cy="20" r="6" fill="url(#logo-grad2)" opacity="0.8"/>
+          <circle cx="24" cy="30" r="6" fill="url(#logo-grad3)" opacity="0.8"/>
+          <defs>
+            <linearGradient id="logo-grad" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+            <linearGradient id="logo-grad2" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#3b82f6"/><stop offset="1" stop-color="#06b6d4"/></linearGradient>
+            <linearGradient id="logo-grad3" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#f43f5e"/><stop offset="1" stop-color="#f97316"/></linearGradient>
+          </defs>
+        </svg>
+        <h1 class="upload-title">ColorScope</h1>
+        <p class="upload-subtitle">色彩分析工具</p>
+      </div>
+      <div class="upload-dropzone" id="upload-dropzone">
+        <div class="dropzone-icon">
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <p class="dropzone-text">拖放圖片到此處</p>
+        <p class="dropzone-hint">或點擊選擇檔案</p>
+        <p class="dropzone-formats">支援 PNG、JPG、WEBP、BMP</p>
+        <input type="file" id="file-input" accept="image/*" hidden />
+      </div>
+    </section>
+
+    <!-- Procreate-style Gallery -->
+    <section class="home-gallery" id="home-gallery" style="display:none">
+      <div class="gallery-section-header">
+        <h2>分析畫冊</h2>
+      </div>
+      <div class="gallery-grid" id="gallery-grid"></div>
+      <div class="gallery-empty hidden" id="gallery-empty">
+        <p>還沒有分析紀錄</p>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===== Main Application ===== -->
+  <div id="app" class="app hidden">
+    <header id="app-header" class="app-header">
+      <div class="header-left">
+        <button class="header-btn icon-btn" id="btn-back" title="返回首頁">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="header-logo">
+          <span class="logo-text">ColorScope</span>
+          <span class="header-filename" id="header-filename"></span>
+        </div>
+      </div>
+      <div class="header-right">
+        <button class="header-btn" id="btn-analysis" title="色彩深度分析">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+          <span>深度分析</span>
+        </button>
+        <button class="header-btn" id="btn-history" title="分析畫冊">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 8h20"/><path d="M10 3v5"/></svg>
+          <span>畫冊</span>
+        </button>
+        <button class="header-btn" id="btn-export" title="匯出">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>匯出</span>
+        </button>
+        <button class="header-btn icon-btn" id="btn-settings" title="設定">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button class="header-btn icon-btn" id="btn-theme" title="切換主題">
+          <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="app-main" class="app-main">
+      <!-- Left Toolbar -->
+      <aside id="toolbar" class="toolbar">
+        <!-- Base Tools -->
+        <div class="toolbar-group">
+          <button class="tool-btn" data-tool="select" title="框選 (Q)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="1" stroke-dasharray="3 2"/></svg>
+            <span class="tool-label">框選</span>
+          </button>
+          <button class="tool-btn active" data-tool="move" title="移動 (V)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3"/><path d="M9 5l3-3 3 3"/><path d="M15 19l3-3-3-3"/><path d="M19 9l3 3-3 3"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+            <span class="tool-label">移動</span>
+          </button>
+          <button class="tool-btn" data-tool="hand" title="手掌 (Z)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 11V6a2 2 0 0 0-4 0v1"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.2 0-3.2-.4-4.8-2L3.3 16a2 2 0 0 1 3-2.7l1.7 1.5"/></svg>
+            <span class="tool-label">手掌</span>
+          </button>
+        </div>
+        <div class="toolbar-divider"></div>
+        <!-- Analysis Tools -->
+        <div class="toolbar-group">
+          <button class="tool-btn" data-tool="pin" title="顏色圖釘 (P)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5" fill="currentColor" opacity="0.3"/></svg>
+            <span class="tool-label">圖釘</span>
+          </button>
+          <button class="tool-btn" data-tool="compare" title="色彩對比 (C)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="19" x2="19" y2="5" stroke-dasharray="4 2"/><circle cx="5" cy="19" r="3"/><circle cx="5" cy="19" r="1.5" fill="currentColor" opacity="0.4"/><circle cx="19" cy="5" r="3"/><circle cx="19" cy="5" r="1.5" fill="currentColor" opacity="0.4"/></svg>
+            <span class="tool-label">對比</span>
+          </button>
+          <button class="tool-btn" data-tool="region" title="區域分析 (R)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 2"/><rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" opacity="0.08"/><circle cx="3" cy="3" r="2" fill="currentColor"/><circle cx="21" cy="3" r="2" fill="currentColor"/><circle cx="3" cy="21" r="2" fill="currentColor"/><circle cx="21" cy="21" r="2" fill="currentColor"/></svg>
+            <span class="tool-label">區域</span>
+          </button>
+          <button class="tool-btn" data-tool="note" title="筆記 (N)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            <span class="tool-label">筆記</span>
+          </button>
+        </div>
+        <div class="toolbar-divider"></div>
+        <!-- Filters -->
+        <div class="toolbar-group toolbar-filters">
+          <button class="tool-btn" data-filter="grayscale" title="灰階模式 (G)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2v20"/><path d="M12 2a10 10 0 0 1 0 20" fill="currentColor" opacity="0.3"/></svg>
+            <span class="tool-label">灰階</span>
+          </button>
+          <button class="tool-btn" data-filter="saturation" title="飽和度熱圖 (S)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+            <span class="tool-label">飽和度</span>
+          </button>
+          <button class="tool-btn" data-filter="hue" title="色相分離 (H)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 7.07 2.93L12 12"/></svg>
+            <span class="tool-label">色相</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Canvas Area -->
+      <div id="canvas-container" class="canvas-container cursor-move">
+        <canvas id="main-canvas"></canvas>
+        <canvas id="overlay-canvas"></canvas>
+
+        <div id="color-hud" class="color-hud hidden">
+          <div class="hud-preview" id="hud-preview"></div>
+          <div class="hud-info">
+            <div id="hud-name" style="font-size: 13px; font-weight: bold; margin-bottom: 6px; color: var(--text-primary); text-shadow: 0 1px 2px rgba(0,0,0,0.5);"></div>
+            <div class="hud-row"><span class="hud-label">HEX</span><span class="hud-value" id="hud-hex" style="font-family: monospace; font-size: 13px;">#000000</span></div>
+            <div class="hud-row"><span class="hud-label">RGB</span><span class="hud-value" id="hud-rgb" style="font-family: monospace; font-size: 13px;">0, 0, 0</span></div>
+            <div class="hud-row"><span class="hud-label">HSL</span><span class="hud-value" id="hud-hsl" style="font-family: monospace; font-size: 13px;">0°, 0%, 0%</span></div>
+            <div class="hud-row"><span class="hud-label">明度</span><span class="hud-value" id="hud-brightness" style="font-size: 13px;">0%</span></div>
+          </div>
+        </div>
+
+        <div id="status-bar" class="status-bar">
+          <span id="status-pos">X: 0  Y: 0</span>
+          <span id="status-zoom">100%</span>
+          <span id="status-size">0 × 0</span>
+        </div>
+      </div>
+
+      <!-- Right Side Panel -->
+      <aside id="side-panel" class="side-panel">
+        <div class="panel-tabs">
+          <button class="panel-tab active" data-tab="analysis">分析</button>
+          <button class="panel-tab" data-tab="pins">圖釘</button>
+          <button class="panel-tab" data-tab="notes">筆記</button>
+          <button class="panel-tab" data-tab="layers">圖層</button>
+        </div>
+
+        <div class="panel-content active" data-content="analysis">
+          <div class="panel-section">
+            <h3 class="section-title">主色調</h3>
+            <div id="palette-swatches" class="palette-swatches"></div>
+          </div>
+          <div class="panel-section">
+            <h3 class="section-title">色彩統計</h3>
+            <div id="color-stats" class="color-stats">
+              <div class="stat-item"><span class="stat-label">冷色</span><div class="stat-bar"><div class="stat-fill cool" id="stat-cool" style="width:0%"></div></div><span class="stat-value" id="stat-cool-val">0%</span></div>
+              <div class="stat-item"><span class="stat-label">暖色</span><div class="stat-bar"><div class="stat-fill warm" id="stat-warm" style="width:0%"></div></div><span class="stat-value" id="stat-warm-val">0%</span></div>
+              <div class="stat-item"><span class="stat-label">中性</span><div class="stat-bar"><div class="stat-fill neutral" id="stat-neutral" style="width:0%"></div></div><span class="stat-value" id="stat-neutral-val">0%</span></div>
+            </div>
+          </div>
+          <div class="panel-section">
+            <h3 class="section-title">明度分佈</h3>
+            <canvas id="histogram-canvas" class="histogram-canvas"></canvas>
+          </div>
+          <div class="panel-section">
+            <h3 class="section-title">飽和度分佈</h3>
+            <canvas id="sat-histogram-canvas" class="histogram-canvas"></canvas>
+          </div>
+        </div>
+
+        <div class="panel-content" data-content="pins">
+          <div class="panel-section">
+            <div class="section-header"><h3 class="section-title">顏色圖釘</h3><button class="section-action" id="btn-clear-pins">清除</button></div>
+            <div id="pin-list" class="pin-list"><div class="empty-state"><p>尚未放置圖釘</p><p class="hint">使用圖釘工具在圖片上點擊放置</p></div></div>
+          </div>
+          <div class="panel-section">
+            <div class="section-header"><h3 class="section-title">色彩對比</h3><button class="section-action" id="btn-clear-comparisons">清除</button></div>
+            <div id="comparison-list" class="comparison-list"><div class="empty-state"><p>尚未建立對比</p><p class="hint">使用對比工具在圖片上拖曳建立</p></div></div>
+          </div>
+        </div>
+
+        <div class="panel-content" data-content="notes">
+          <div class="panel-section">
+            <div class="section-header"><h3 class="section-title">畫布筆記</h3><button class="section-action" id="btn-clear-notes">清除</button></div>
+            <div id="note-list" class="note-list"><div class="empty-state"><p>尚未添加筆記</p><p class="hint">使用筆記工具在圖片上點擊添加</p></div></div>
+          </div>
+        </div>
+
+        <div class="panel-content" data-content="layers">
+          <div class="panel-section">
+            <div class="section-header"><h3 class="section-title">圖層</h3><button class="section-action" id="btn-add-layer">+ 新增</button></div>
+            <div id="layer-list" class="layer-list"></div>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- ===== Context Menu ===== -->
+  <div id="context-menu" class="context-menu hidden"></div>
+
+  <!-- ===== Export Dialog ===== -->
+  <div id="export-dialog" class="modal-overlay hidden">
+    <div class="modal export-modal">
+      <div class="modal-header"><h2>匯出</h2><button class="modal-close" id="export-close"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+      
+      <!-- Source selection -->
+      <div class="export-section">
+        <label class="export-section-label">匯出來源</label>
+        <select id="export-source" class="export-select">
+          <option value="original">原圖 (Original)</option>
+          <option value="grayscale">灰階 (Grayscale)</option>
+          <option value="saturation">飽和度熱圖 (Saturation Heatmap)</option>
+          <option value="hue">色相隔離 (Hue Isolation)</option>
+          <option value="analysis">綜合分析數據 (Full Analysis)</option>
+        </select>
+      </div>
+
+      <!-- Overlay options -->
+      <div class="export-options">
+        <label class="export-option"><input type="checkbox" id="export-canvas" checked /><span class="checkbox-custom"></span><span>畫布標記（圖釘、筆記、對比線）</span></label>
+        <label class="export-option"><input type="checkbox" id="export-palette" /><span class="checkbox-custom"></span><span>主色調色板</span></label>
+        <label class="export-option"><input type="checkbox" id="export-pins" /><span class="checkbox-custom"></span><span>圖釘資訊表</span></label>
+        <label class="export-option"><input type="checkbox" id="export-notes" /><span class="checkbox-custom"></span><span>筆記內容</span></label>
+        <label class="export-option"><input type="checkbox" id="export-stats" /><span class="checkbox-custom"></span><span>色彩統計數據</span></label>
+      </div>
+
+      <div class="export-format"><label class="export-format-label">格式</label><div class="format-buttons"><button class="format-btn active" data-format="png">PNG</button><button class="format-btn" data-format="jpg">JPG</button></div></div>
+      <div class="export-actions"><button class="btn btn-primary" id="btn-do-export">匯出圖片</button></div>
+    </div>
+  </div>
+
+  <!-- ===== Hue Filter Dialog ===== -->
+  <div id="hue-dialog" class="modal-overlay hidden">
+    <div class="modal hue-modal">
+      <div class="modal-header"><h2>色相隔離</h2><button class="modal-close" id="hue-dialog-close"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+      <div class="hue-form">
+        <div class="hue-range-bar" id="hue-range-bar"></div>
+        <div class="hue-inputs">
+          <label><span>起始色相</span><input type="range" id="hue-start" min="0" max="360" value="0" /><span id="hue-start-val">0°</span></label>
+          <label><span>結束色相</span><input type="range" id="hue-end" min="0" max="360" value="60" /><span id="hue-end-val">60°</span></label>
+        </div>
+      </div>
+      <div class="hue-actions"><button class="btn btn-secondary" id="btn-hue-reset">重置</button><button class="btn btn-primary" id="btn-hue-apply">套用</button></div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
