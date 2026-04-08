@@ -16,16 +16,19 @@ import { ComparisonTool } from './tools/ComparisonTool.js';
 import { RegionTool } from './tools/RegionTool.js';
 import { NoteTool } from './tools/NoteTool.js';
 import { FilterTool } from './tools/FilterTool.js';
+import { HarmonyTool } from './tools/HarmonyTool.js';
 import { PaletteExtractor } from './analysis/PaletteExtractor.js';
 import { HistogramAnalyzer } from './analysis/HistogramAnalyzer.js';
 import { ColorStats } from './analysis/ColorStats.js';
 import { settingsModal } from './ui/SettingsModal.js';
 import { advancedAnalysisModal } from './ui/AdvancedAnalysisModal.js';
+import { PalettePage } from './ui/PalettePage.js';
 
 class ColorScopeApp {
   constructor() {
     this.imageLoader = new ImageLoader();
     this.canvasEngine = new CanvasEngine();
+    this.imageLoader.canvasEngine = this.canvasEngine;
     this.layerManager = new LayerManager();
     this.canvasEngine.setLayerManager(this.layerManager);
 
@@ -38,10 +41,13 @@ class ColorScopeApp {
     this.regionTool = new RegionTool(this.imageLoader, this.canvasEngine, this.layerManager);
     this.noteTool = new NoteTool(this.canvasEngine, this.layerManager);
     this.filterTool = new FilterTool();
+    this.harmonyTool = new HarmonyTool(this.imageLoader, this.canvasEngine);
+    this.palettePage = new PalettePage(this);
 
     this._currentDataURL = null;
     this._currentFileName = '';
     this._currentHistoryId = null;
+    this._propertyPanelState = { type: 'empty' };
 
     this._initTheme();
     this._initEvents();
@@ -90,8 +96,16 @@ class ColorScopeApp {
       $('#header-filename').textContent = data.fileName;
       $('#status-size').textContent = `${data.image.width} × ${data.image.height}`;
 
-      this._currentHistoryId = null; // Unbind from previous image so clearAll doesn't wipe its history
-      this.layerManager.clearAll(); // Ensure objects don't leak from previous image
+      // Reset filters and property panel on new image
+      this.toolManager.activeFilters.forEach(f => {
+        $(`.tool-btn[data-filter="${f}"]`)?.classList.remove('filter-active');
+      });
+      this.toolManager.activeFilters.clear();
+      this._clearPropertyPanel();
+      this._updateFilterLegend(null);
+
+      this._currentHistoryId = null;
+      this.layerManager.clearAll();
       if (data.state) {
         this.layerManager.deserialize(data.state);
       }
@@ -104,7 +118,15 @@ class ColorScopeApp {
       const pixel = this.imageLoader.getPixel(pos.imgX, pos.imgY);
       this._updateHUD(pixel, pos);
       this._updateStatusPos(pos.imgX, pos.imgY);
+      this._updateFilterLegendArrow(pixel);
     });
+
+    bus.on('filter:apply', (filter) => this._updateFilterLegend(filter.type));
+    bus.on('filter:clear', () => this._updateFilterLegend(null));
+    
+    // Filter property panel
+    bus.on('filter:show-props', ({ filterName }) => this._renderFilterProps(filterName));
+    bus.on('filter:props-clear', () => this._clearPropertyPanel());
 
     bus.on('canvas:status', (status) => {
       $('#status-zoom').textContent = status.zoom + '%';
@@ -118,20 +140,34 @@ class ColorScopeApp {
       this._renderLayerPanel();
       this.canvasEngine.render();
       this._saveCurrentState();
+      this._queueAnalysisUpdate();
+    });
+
+    bus.on('layers:properties-changed', () => {
+      this.canvasEngine.render();
+      this._saveCurrentState();
+      this._queueAnalysisUpdate();
     });
 
     bus.on('layers:objects-changed', () => {
       this._updateObjectLists();
       this.canvasEngine.render();
-      this._saveCurrentState(); // Persist changes immediately
+      this._saveCurrentState();
     });
 
     $('#btn-back')?.addEventListener('click', () => this._goHome());
     $('#btn-history')?.addEventListener('click', () => this._goHome());
     
-    // Settings & Analysis
     $('#btn-analysis')?.addEventListener('click', () => {
       advancedAnalysisModal.show(this.imageLoader);
+    });
+
+    $('#btn-palette-home')?.addEventListener('click', () => {
+      this.palettePage.show(false);
+    });
+
+    $('#btn-palette-gen')?.addEventListener('click', () => {
+      this.palettePage.show(true);
     });
 
     $('#btn-settings')?.addEventListener('click', () => {
@@ -164,7 +200,17 @@ class ColorScopeApp {
 
   _updateHUD(pixel, pos) {
     const hud = $('#color-hud');
-    if (!pixel) { hud.classList.add('hidden'); return; }
+    
+    const isMenuOpen = $('#context-menu') && !$('#context-menu').classList.contains('hidden');
+    const isSelectTool = bus._currentTool === 'move';
+    const isSatFilter = this.canvasEngine._activeFilter === 'saturation';
+    const isRightDragging = this.canvasEngine.isPanning || this.canvasEngine._rightBtnDown;
+    
+    if (!pixel || !isSelectTool || isMenuOpen || isSatFilter || isRightDragging) { 
+      hud.classList.add('hidden'); 
+      return; 
+    }
+    
     hud.classList.remove('hidden');
 
     const hex = rgbToHex(pixel.r, pixel.g, pixel.b);
@@ -194,7 +240,72 @@ class ColorScopeApp {
     }
   }
 
+  _updateFilterLegend(type) {
+    const legend = $('#filter-legend');
+    if (!legend) return;
+    
+    if (!type || (type !== 'grayscale' && type !== 'saturation')) {
+      legend.classList.add('hidden');
+      return;
+    }
+
+    legend.classList.remove('hidden');
+    const label = $('#filter-legend-label');
+    const bg = $('#filter-legend-bar-bg');
+    
+    if (type === 'grayscale') {
+      label.textContent = '灰階';
+      bg.style.background = 'linear-gradient(to right, #000000, #ffffff)';
+    } else if (type === 'saturation') {
+      label.textContent = '飽和度';
+      // Generate gradient programmatically from saturationHeatColor
+      import('./core/ColorMath.js').then(({ saturationHeatColor }) => {
+        const stops = [];
+        for (let i = 0; i <= 20; i++) {
+          const pct = i * 5;
+          const [r, g, b] = saturationHeatColor(pct);
+          stops.push(`rgb(${r},${g},${b}) ${pct}%`);
+        }
+        bg.style.background = `linear-gradient(to right, ${stops.join(', ')})`;
+      });
+    }
+  }
+
+  _updateFilterLegendArrow(pixel) {
+    const legend = $('#filter-legend');
+    if (!legend || legend.classList.contains('hidden') || !pixel) return;
+
+    const arrow = $('#filter-legend-arrow');
+    const valText = $('#filter-legend-value');
+    const type = this.canvasEngine._activeFilter;
+    
+    let pct = 0;
+    if (type === 'grayscale') {
+      const gray = Math.round(0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
+      pct = (gray / 255) * 100;
+      valText.textContent = Math.round(pct) + '%';
+    } else if (type === 'saturation') {
+      import('./core/ColorMath.js').then(({ rgbToHsv }) => {
+        const hsv = rgbToHsv(pixel.r, pixel.g, pixel.b);
+        pct = hsv.s;
+        arrow.style.left = `${pct}%`;
+        valText.textContent = Math.round(pct) + '%';
+      });
+      return; // Async update for saturation
+    }
+
+    arrow.style.left = `${pct}%`;
+  }
+
   // ===== Analysis =====
+  _queueAnalysisUpdate() {
+    if (this._analysisTimeout) clearTimeout(this._analysisTimeout);
+    this._analysisTimeout = setTimeout(() => {
+      const data = this.canvasEngine.getCompositeImageData() || this.imageLoader.imageData;
+      if (data) this._runAnalysis(data);
+    }, 400); // 400ms debounce
+  }
+
   _runAnalysis(imageData) {
     const palette = PaletteExtractor.extract(imageData, 6);
     this._renderPalette(palette);
@@ -225,29 +336,39 @@ class ColorScopeApp {
   _renderPalette(palette) {
     const container = $('#palette-swatches');
     if (!container) return;
-    container.innerHTML = '';
-    for (const color of palette) {
-      container.appendChild(createElement('div', { 
-        className: 'palette-swatch', 
-        style: { backgroundColor: color.hex, cursor: 'pointer' },
-        onClick: () => {
-          import('./core/ColorMath.js').then(({ rgbToHsv, perceivedBrightness, brightnessLabel }) => {
-            import('./ui/ColorDetailsModal.js').then(({ colorDetailsModal }) => {
-              const hsv = rgbToHsv(color.r, color.g, color.b);
-              const b = perceivedBrightness(color.r, color.g, color.b);
-              colorDetailsModal.show({
-                r: color.r, g: color.g, b: color.b, hex: color.hex,
-                hsl: color.hsl, hsv, brightness: b, brightLabel: brightnessLabel(b),
-                imgX: 0, imgY: 0
-              });
-            });
+
+    const openColorDetails = (color) => {
+      import('./core/ColorMath.js').then(({ rgbToHsv, perceivedBrightness, brightnessLabel }) => {
+        import('./ui/ColorDetailsModal.js').then(({ colorDetailsModal }) => {
+          const hsv = rgbToHsv(color.r, color.g, color.b);
+          const b = perceivedBrightness(color.r, color.g, color.b);
+          colorDetailsModal.show({
+            r: color.r, g: color.g, b: color.b, hex: color.hex,
+            hsl: color.hsl, hsv, brightness: b, brightLabel: brightnessLabel(b),
+            imgX: 0, imgY: 0
           });
-        }
-      }, [
-        createElement('span', { className: 'swatch-tooltip', textContent: color.hex.toUpperCase() }),
-        createElement('span', { className: 'swatch-pct', textContent: color.percentage + '%' })
-      ]));
-    }
+        });
+      });
+    };
+
+    const existing = [...container.children];
+    palette.forEach((color, index) => {
+      let swatch = existing[index];
+      if (!swatch) {
+        swatch = createElement('div', { className: 'palette-swatch' }, [
+          createElement('span', { className: 'swatch-tooltip' }),
+          createElement('span', { className: 'swatch-pct' })
+        ]);
+        container.appendChild(swatch);
+      }
+
+      swatch.style.backgroundColor = color.hex;
+      swatch.onclick = () => openColorDetails(color);
+      $('.swatch-tooltip', swatch).textContent = color.hex.toUpperCase();
+      $('.swatch-pct', swatch).textContent = `${color.percentage}%`;
+    });
+
+    existing.slice(palette.length).forEach(node => node.remove());
   }
 
   _renderStats(stats) {
@@ -265,17 +386,490 @@ class ColorScopeApp {
   }
 
   _initPanelTabs() {
-    $$('.panel-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        $$('.panel-tab').forEach(t => t.classList.remove('active'));
-        $$('.panel-content').forEach(c => c.classList.remove('active'));
-        tab.classList.add('active');
-        $(`.panel-content[data-content="${tab.dataset.tab}"]`)?.classList.add('active');
-        if (tab.dataset.tab === 'analysis' && this.imageLoader.imageData) {
-          setTimeout(() => this._drawHistograms(this.imageLoader.imageData), 50);
-        }
+    // Each zone's tabs switch independently
+    $$('.panel-tabs').forEach(tabBar => {
+      const zone = tabBar.closest('.panel-zone');
+      if (!zone) return;
+      
+      const tabs = $$('.panel-tab', tabBar);
+      tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          // Deactivate siblings in same zone
+          tabs.forEach(t => t.classList.remove('active'));
+          $$('.panel-content', zone).forEach(c => c.classList.remove('active'));
+          
+          tab.classList.add('active');
+          const content = $(`.panel-content[data-content="${tab.dataset.tab}"]`, zone);
+          content?.classList.add('active');
+          
+          if (tab.dataset.tab === 'analysis' && this.imageLoader.imageData) {
+            setTimeout(() => this._drawHistograms(this.imageLoader.imageData), 50);
+          }
+        });
       });
     });
+  }
+
+  _switchToTab(zone, tabName) {
+    const zoneEl = $(`.panel-zone-${zone}`);
+    if (!zoneEl) return;
+    const tabBar = $('.panel-tabs', zoneEl);
+    if (!tabBar) return;
+    const tabs = $$('.panel-tab', tabBar);
+    tabs.forEach(t => t.classList.remove('active'));
+    $$('.panel-content', zoneEl).forEach(c => c.classList.remove('active'));
+    const targetTab = tabs.find(t => t.dataset.tab === tabName);
+    if (targetTab) targetTab.classList.add('active');
+    const content = $(`.panel-content[data-content="${tabName}"]`, zoneEl);
+    if (content) content.classList.add('active');
+  }
+
+  _showPropertyPanel(html, autoSwitchToTab = true, state = null) {
+    const container = $('#properties-content');
+    if (!container) return;
+    container.innerHTML = html;
+    if (state) {
+      this._propertyPanelState = state;
+    }
+    if (autoSwitchToTab) {
+      this._switchToTab('upper', 'properties');
+    }
+  }
+
+  _clearPropertyPanel() {
+    const container = $('#properties-content');
+    if (!container) return;
+    this._propertyPanelState = { type: 'empty' };
+    container.innerHTML = '<div class="empty-state"><p>選擇濾鏡或調整圖層</p><p class="hint">啟用左側濾鏡或點擊調整圖層以顯示屬性</p></div>';
+  }
+
+  _renderFilterProps(filterName) {
+    const labels = { hue: '色相隔離', analogous: '相似色檢查', complementary: '對比色檢查' };
+    const isHue = filterName === 'hue';
+    const isHarmony = filterName === 'analogous' || filterName === 'complementary';
+
+    let html = `<h3 class="section-title">${labels[filterName] || filterName}</h3>`;
+
+    if (isHue) {
+      html += `
+        <div class="property-slider-group">
+          <div class="hue-range-bar hue-range-bar-compact" id="prop-hue-range-bar"></div>
+        </div>
+        <label class="property-slider-group">
+          <div class="property-slider-head">
+            <span class="property-slider-label">起始色相</span><span class="property-slider-value" id="prop-hue-start-val">0°</span>
+          </div>
+          <input class="property-slider" type="range" id="prop-hue-start" min="0" max="360" value="0">
+        </label>
+        <label class="property-slider-group">
+          <div class="property-slider-head">
+            <span class="property-slider-label">結束色相</span><span class="property-slider-value" id="prop-hue-end-val">60°</span>
+          </div>
+          <input class="property-slider" type="range" id="prop-hue-end" min="0" max="360" value="60">
+        </label>
+      `;
+    }
+
+    if (isHarmony) {
+      html += `
+        <p class="property-intro">
+          ${filterName === 'analogous' ? '高亮與基準色相鄰的色彩，其餘灰階化。' : '高亮基準色的互補色（對向 180°），其餘灰階化。'}
+        </p>
+        <label class="property-slider-group">
+          <div class="property-slider-head">
+            <span class="property-slider-label">基準色相</span><span class="property-slider-value" id="prop-harmony-hue-val">0°</span>
+          </div>
+          <input class="property-slider" type="range" id="prop-harmony-hue" min="0" max="360" value="0">
+          <div id="prop-harmony-preview" class="property-preview-chip" style="background:hsl(0,100%,50%);"></div>
+        </label>
+        <label class="property-slider-group">
+          <div class="property-slider-head">
+            <span class="property-slider-label">容差角度</span><span class="property-slider-value" id="prop-harmony-tol-val">±30°</span>
+          </div>
+          <input class="property-slider" type="range" id="prop-harmony-tol" min="5" max="90" value="30">
+        </label>
+      `;
+    }
+
+    this._showPropertyPanel(html, true, { type: 'filter', filterName });
+
+    // Bind events after DOM is set
+    if (isHue) {
+      const hs = $('#prop-hue-start'), he = $('#prop-hue-end');
+      const applyHue = () => {
+        const s = parseInt(hs.value), e = parseInt(he.value);
+        $('#prop-hue-start-val').textContent = s + '°';
+        $('#prop-hue-end-val').textContent = e + '°';
+        bus.emit('filter:apply', { type: 'hue', params: { hueStart: s, hueEnd: e } });
+      };
+      hs.addEventListener('input', applyHue);
+      he.addEventListener('input', applyHue);
+      applyHue();
+    }
+
+    if (isHarmony) {
+      const hueSlider = $('#prop-harmony-hue'), tolSlider = $('#prop-harmony-tol');
+      const applyHarmony = () => {
+        const baseHue = parseInt(hueSlider.value);
+        const tol = parseInt(tolSlider.value);
+        $('#prop-harmony-hue-val').textContent = baseHue + '°';
+        $('#prop-harmony-tol-val').textContent = `±${tol}°`;
+        $('#prop-harmony-preview').style.background = `hsl(${baseHue}, 100%, 50%)`;
+
+        let center = filterName === 'complementary' ? (baseHue + 180) % 360 : baseHue;
+        let start = (center - tol + 360) % 360;
+        let end = (center + tol) % 360;
+        bus.emit('filter:apply', { type: 'hue', params: { hueStart: start, hueEnd: end } });
+      };
+      hueSlider.addEventListener('input', applyHarmony);
+      tolSlider.addEventListener('input', applyHarmony);
+      applyHarmony();
+    }
+  }
+
+  _renderAdjustLayerProps(layer, autoSwitchToTab = false) {
+    if (!layer || layer.type !== 'adjustment') {
+      this._clearPropertyPanel();
+      return;
+    }
+
+    const nameMap = { hsl: '色相/飽和度/明度', levels: '色階 (Levels)', curves: '曲線 (Curves)', colorbalance: '色彩平衡', temperature: '色溫' };
+    const params = layer.adjustParams;
+    let html = `<h3 class="section-title">${nameMap[layer.adjustType] || layer.adjustType}</h3>`;
+
+    if (layer.adjustType === 'hsl') {
+      html += this._makeSlider('adj-layer-hue', '色相 (Hue)', 'hue', params.hue, -180, 180);
+      html += this._makeSlider('adj-layer-sat', '飽和度 (Saturation)', 'saturation', params.saturation, -100, 100);
+      html += this._makeSlider('adj-layer-bri', '明度 (Lightness)', 'brightness', params.brightness, -100, 100);
+    } else if (layer.adjustType === 'levels') {
+      // CSP-style Levels: Histogram + 3 draggable handles (black, gamma, white)
+      const gammaPos = (params.gamma === undefined ? 1.0 : params.gamma);
+      const minPct = (params.levelsMin / 255) * 100;
+      const maxPct = (params.levelsMax / 255) * 100;
+      const gammaPct = minPct + (maxPct - minPct) * (1 / (gammaPos + 1));
+      html += `
+        <div style="position:relative; margin-bottom:6px;">
+          <canvas id="levels-histogram" style="width:100%; height:80px; display:block; border-radius:6px; background:rgba(0,0,0,0.3);"></canvas>
+          <div id="levels-bar" style="position:relative; height:24px; margin-top:2px; background:linear-gradient(to right, #000, #fff); border-radius:4px;">
+            <div id="levels-handle-min" class="levels-handle" data-key="levelsMin" style="left:${minPct}%; position:absolute; bottom:0; width:0; height:0; border-left:7px solid transparent; border-right:7px solid transparent; border-bottom:10px solid #000; transform:translateX(-7px); cursor:ew-resize; filter:drop-shadow(0 1px 2px rgba(255,255,255,0.4));"></div>
+            <div id="levels-handle-gamma" class="levels-handle" data-key="gamma" style="left:${gammaPct}%; position:absolute; bottom:0; width:0; height:0; border-left:7px solid transparent; border-right:7px solid transparent; border-bottom:10px solid #888; transform:translateX(-7px); cursor:ew-resize; filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5));"></div>
+            <div id="levels-handle-max" class="levels-handle" data-key="levelsMax" style="left:${maxPct}%; position:absolute; bottom:0; width:0; height:0; border-left:7px solid transparent; border-right:7px solid transparent; border-bottom:10px solid #fff; transform:translateX(-7px); cursor:ew-resize; filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5));"></div>
+          </div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-tertiary); margin-bottom:8px;">
+          <span>黑點: <b id="levels-min-val" style="color:var(--text-primary);">${params.levelsMin}</b></span>
+          <span>中間調: <b id="levels-gamma-val" style="color:var(--text-primary);">${gammaPos.toFixed(2)}</b></span>
+          <span>白點: <b id="levels-max-val" style="color:var(--text-primary);">${params.levelsMax}</b></span>
+        </div>
+      `;
+    } else if (layer.adjustType === 'curves') {
+      // CSP-style Curves: Interactive spline canvas
+      html += `
+        <div style="position:relative; margin-bottom:8px; border:1px solid var(--border-subtle); border-radius:6px; overflow:hidden; background:rgba(0,0,0,0.3);">
+          <canvas id="curves-canvas" style="width:100%; height:200px; display:block; cursor:crosshair;"></canvas>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-tertiary);">
+          <span>點擊添加節點 · 拖移調整 · 右鍵刪除</span>
+          <button id="curves-reset-btn" style="background:none; border:1px solid var(--border-subtle); color:var(--text-secondary); border-radius:4px; padding:2px 8px; cursor:pointer; font-size:11px;">重置</button>
+        </div>
+      `;
+    } else if (layer.adjustType === 'colorbalance') {
+      html += this._makeSlider('adj-layer-cr', '紅-青 (Red-Cyan)', 'redCyan', params.redCyan || 0, -100, 100);
+      html += this._makeSlider('adj-layer-mg', '綠-洋紅 (Green-Magenta)', 'greenMagenta', params.greenMagenta || 0, -100, 100);
+      html += this._makeSlider('adj-layer-by', '藍-黃 (Blue-Yellow)', 'blueYellow', params.blueYellow || 0, -100, 100);
+    } else if (layer.adjustType === 'temperature') {
+      html += this._makeSlider('adj-layer-temp', '色溫 (Temperature)', 'temperature', params.temperature || 0, -100, 100);
+      html += this._makeSlider('adj-layer-tint', '色調 (Tint)', 'tint', params.tint || 0, -100, 100);
+    }
+
+    this._showPropertyPanel(html, autoSwitchToTab, { type: 'adjustment', layerId: layer.id });
+
+    // Bind all generic sliders (HSL, colorbalance, temperature)
+    const container = $('#properties-content');
+    const sliders = container.querySelectorAll('input[type="range"]');
+    sliders.forEach(slider => {
+      slider.addEventListener('input', () => {
+        const key = slider.dataset.paramKey;
+        const val = parseFloat(slider.value);
+        layer.adjustParams[key] = val;
+        slider.parentElement.querySelector('.adj-val').textContent = val;
+        bus.emit('layers:properties-changed');
+      });
+    });
+
+    // === Levels interactive panel ===
+    if (layer.adjustType === 'levels') {
+      this._initLevelsPanel(layer);
+    }
+
+    // === Curves interactive panel ===
+    if (layer.adjustType === 'curves') {
+      this._initCurvesPanel(layer);
+    }
+  }
+
+  _initLevelsPanel(layer) {
+    const histCanvas = $('#levels-histogram');
+    if (!histCanvas) return;
+
+    // Draw brightness histogram from current composite
+    const imgData = this.canvasEngine.getCompositeImageData() || this.imageLoader.imageData;
+    if (imgData) {
+      const bins = HistogramAnalyzer.brightnessHistogram(imgData);
+      HistogramAnalyzer.drawHistogram(histCanvas, bins, '#94a3b8');
+    }
+
+    const bar = $('#levels-bar');
+    if (!bar) return;
+
+    const gammaEl = $('#levels-handle-gamma');
+    const gammaValEl = $('#levels-gamma-val');
+
+    const updateGammaPosition = () => {
+      if (!gammaEl) return;
+      const gamma = layer.adjustParams.gamma || 1.0;
+      const minPct = (layer.adjustParams.levelsMin / 255) * 100;
+      const maxPct = (layer.adjustParams.levelsMax / 255) * 100;
+      const gammaPct = minPct + (maxPct - minPct) * (1 / (gamma + 1));
+      gammaEl.style.left = `${gammaPct}%`;
+      if (gammaValEl) gammaValEl.textContent = gamma.toFixed(2);
+    };
+
+    // Black/White point handles
+    const bwHandles = [
+      { el: $('#levels-handle-min'), key: 'levelsMin', valEl: $('#levels-min-val') },
+      { el: $('#levels-handle-max'), key: 'levelsMax', valEl: $('#levels-max-val') }
+    ];
+
+    bwHandles.forEach(({ el, key, valEl }) => {
+      if (!el) return;
+      let dragging = false;
+
+      const onMove = (e) => {
+        if (!dragging) return;
+        const rect = bar.getBoundingClientRect();
+        let pct = (e.clientX - rect.left) / rect.width;
+        pct = Math.max(0, Math.min(1, pct));
+        const val = Math.round(pct * 255);
+
+        if (key === 'levelsMin' && val >= layer.adjustParams.levelsMax) return;
+        if (key === 'levelsMax' && val <= layer.adjustParams.levelsMin) return;
+
+        layer.adjustParams[key] = val;
+        el.style.left = `${pct * 100}%`;
+        valEl.textContent = val;
+        updateGammaPosition();
+        bus.emit('layers:properties-changed');
+      };
+
+      el.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        dragging = true;
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', () => {
+          dragging = false;
+          window.removeEventListener('mousemove', onMove);
+        }, { once: true });
+      });
+    });
+
+    // Gamma / Midtone handle
+    if (gammaEl) {
+      let dragging = false;
+      const onMove = (e) => {
+        if (!dragging) return;
+        const rect = bar.getBoundingClientRect();
+        let pct = (e.clientX - rect.left) / rect.width;
+        pct = Math.max(0, Math.min(1, pct));
+
+        // Gamma is mapped from position relative to min/max range
+        const minPct = layer.adjustParams.levelsMin / 255;
+        const maxPct = layer.adjustParams.levelsMax / 255;
+        // Clamp within min/max
+        pct = Math.max(minPct + 0.01, Math.min(maxPct - 0.01, pct));
+        // Convert position to gamma value
+        const relPos = (pct - minPct) / Math.max(0.01, maxPct - minPct);
+        // relPos = 1 / (gamma + 1), so gamma = (1 / relPos) - 1
+        const gamma = Math.max(0.1, Math.min(9.9, (1 / relPos) - 1));
+
+        layer.adjustParams.gamma = Math.round(gamma * 100) / 100;
+        gammaEl.style.left = `${pct * 100}%`;
+        if (gammaValEl) gammaValEl.textContent = layer.adjustParams.gamma.toFixed(2);
+        bus.emit('layers:properties-changed');
+      };
+
+      gammaEl.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        dragging = true;
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', () => {
+          dragging = false;
+          window.removeEventListener('mousemove', onMove);
+        }, { once: true });
+      });
+    }
+  }
+
+  async _initCurvesPanel(layer) {
+    const canvas = $('#curves-canvas');
+    if (!canvas) return;
+    
+    // Load spline math once before drawing
+    const { interpolateSpline } = await import('./core/ColorMath.js');
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width > 0 ? rect.width : 240;
+    const h = rect.height > 0 ? rect.height : 200;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const points = layer.adjustParams.points;
+    let dragIdx = -1;
+
+    const toCanvas = (pt) => [pt[0] / 255 * w, (1 - pt[1] / 255) * h];
+    const toData = (cx, cy) => [Math.round(cx / w * 255), Math.round((1 - cy / h) * 255)];
+
+    const draw = () => {
+      ctx.clearRect(0, 0, w, h);
+
+      // Grid
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = 1;
+      for (let i = 1; i < 4; i++) {
+        ctx.beginPath(); ctx.moveTo(w * i / 4, 0); ctx.lineTo(w * i / 4, h); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, h * i / 4); ctx.lineTo(w, h * i / 4); ctx.stroke();
+      }
+
+      // Diagonal reference line
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(0, h); ctx.lineTo(w, 0); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw spline curve
+      if (points.length >= 2) {
+        ctx.strokeStyle = '#6366f1';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+
+        const lut = interpolateSpline(points, 256);
+        for (let i = 0; i < 256; i++) {
+          const cx = i / 255 * w;
+          const cy = (1 - lut[i]) * h;
+          if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+        }
+        ctx.stroke();
+
+        // Draw control points
+        points.forEach((pt, idx) => {
+          const [cx, cy] = toCanvas(pt);
+          ctx.fillStyle = idx === dragIdx ? '#c084fc' : '#6366f1';
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+        });
+      }
+    };
+
+    draw();
+
+    // Mouse interactions
+    const getMousePos = (e) => {
+      const r = canvas.getBoundingClientRect();
+      return [e.clientX - r.left, e.clientY - r.top];
+    };
+
+    const findPoint = (mx, my) => {
+      for (let i = 0; i < points.length; i++) {
+        const [cx, cy] = toCanvas(points[i]);
+        if (Math.abs(mx - cx) < 10 && Math.abs(my - cy) < 10) return i;
+      }
+      return -1;
+    };
+
+    canvas.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const [mx, my] = getMousePos(e);
+
+      if (e.button === 2) {
+        // Right-click: remove point (if not first/last)
+        const idx = findPoint(mx, my);
+        if (idx > 0 && idx < points.length - 1) {
+          points.splice(idx, 1);
+          draw();
+          bus.emit('layers:properties-changed');
+        }
+        return;
+      }
+
+      const idx = findPoint(mx, my);
+      if (idx >= 0) {
+        // Start dragging existing point
+        dragIdx = idx;
+      } else {
+        // Add new point
+        const [dx, dy] = toData(mx, my);
+        // Insert sorted by x
+        let insertIdx = points.findIndex(p => p[0] > dx);
+        if (insertIdx === -1) insertIdx = points.length;
+        points.splice(insertIdx, 0, [Math.max(0, Math.min(255, dx)), Math.max(0, Math.min(255, dy))]);
+        dragIdx = insertIdx;
+        draw();
+        bus.emit('layers:properties-changed');
+      }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (dragIdx < 0) return;
+      const [mx, my] = getMousePos(e);
+      let [dx, dy] = toData(mx, my);
+      dx = Math.max(0, Math.min(255, dx));
+      dy = Math.max(0, Math.min(255, dy));
+
+      // First and last points: lock X
+      if (dragIdx === 0) dx = 0;
+      if (dragIdx === points.length - 1) dx = 255;
+
+      // Clamp X between neighbors
+      if (dragIdx > 0) dx = Math.max(points[dragIdx - 1][0] + 1, dx);
+      if (dragIdx < points.length - 1) dx = Math.min(points[dragIdx + 1][0] - 1, dx);
+
+      points[dragIdx] = [dx, dy];
+      draw();
+      bus.emit('layers:properties-changed');
+    });
+
+    canvas.addEventListener('mouseup', () => { dragIdx = -1; });
+    canvas.addEventListener('mouseleave', () => { dragIdx = -1; });
+
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // Reset button
+    $('#curves-reset-btn')?.addEventListener('click', () => {
+      layer.adjustParams.points = [[0, 0], [128, 128], [255, 255]];
+      points.length = 0;
+      points.push(...layer.adjustParams.points);
+      draw();
+      bus.emit('layers:properties-changed');
+    });
+  }
+
+  _makeSlider(id, label, paramKey, value, min, max) {
+    return `
+      <label class="property-slider-group">
+        <div class="property-slider-head">
+          <span class="property-slider-label">${label}</span><span class="adj-val property-slider-value">${value}</span>
+        </div>
+        <input class="property-slider" type="range" id="${id}" data-param-key="${paramKey}" min="${min}" max="${max}" value="${value}">
+      </label>
+    `;
   }
 
   _updateObjectLists() {
@@ -455,6 +1049,31 @@ class ColorScopeApp {
     $('#btn-add-layer')?.addEventListener('click', () => {
       this.layerManager.addLayer(`圖層 ${this.layerManager.layers.length + 1}`);
     });
+
+    // Adjustment layer dropdown
+    const adjustBtn = $('#btn-add-adjust');
+    const adjustMenu = $('#adjust-layer-menu');
+    if (adjustBtn && adjustMenu) {
+      adjustBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        adjustMenu.classList.toggle('hidden');
+      });
+      $$('.dropdown-item[data-adjust]').forEach(item => {
+        item.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const type = item.dataset.adjust;
+          this.layerManager.addAdjustmentLayer(type);
+          adjustMenu.classList.add('hidden');
+        });
+      });
+      // Close dropdown on outside click
+      window.addEventListener('mousedown', (e) => {
+        if (!adjustBtn.contains(e.target) && !adjustMenu.contains(e.target)) {
+          adjustMenu.classList.add('hidden');
+        }
+      });
+    }
+
     this._renderLayerPanel();
   }
 
@@ -466,18 +1085,24 @@ class ColorScopeApp {
     for (let i = this.layerManager.layers.length - 1; i >= 0; i--) {
       const layer = this.layerManager.layers[i];
       const isActive = layer.id === this.layerManager.activeLayerId;
+      const isAdjust = layer.type === 'adjustment';
 
-      const item = createElement('div', { className: `layer-item${isActive ? ' active' : ''}` }, [
+      const namePrefix = isAdjust ? '◆ ' : '';
+      const item = createElement('div', { 
+        className: `layer-item${isActive ? ' active' : ''}${isAdjust ? ' adjustment' : ''}`,
+        draggable: 'true'
+      }, [
         createElement('button', {
           className: `layer-visibility${layer.visible ? ' visible' : ''}`,
           innerHTML: layer.visible ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>` : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`,
           onClick: (e) => { e.stopPropagation(); this.layerManager.toggleLayerVisibility(layer.id); }
         }),
         createElement('span', {
-          className: 'layer-name', textContent: layer.name,
+          className: 'layer-name', textContent: namePrefix + layer.name,
+          style: isAdjust ? { color: 'var(--accent)', fontStyle: 'italic' } : {},
           onDblclick: () => this._renameLayerInline(layer)
         }),
-        createElement('span', { className: 'layer-count', textContent: `${layer.objects.length}` }),
+        createElement('span', { className: 'layer-count', textContent: isAdjust ? '' : `${layer.objects.length}` }),
         createElement('button', {
           className: 'layer-delete',
           innerHTML: '×',
@@ -485,8 +1110,85 @@ class ColorScopeApp {
         })
       ]);
 
-      item.addEventListener('click', () => this.layerManager.setActiveLayer(layer.id));
+      item.dataset.layerId = layer.id;
+
+      // Drag and Drop Events
+      item.addEventListener('dragstart', (e) => {
+        window._colorScopeDraggedLayerId = layer.id; // Guarantee type & retrieval
+        window._colorScopePendingDrop = null;
+        if (e.dataTransfer) {
+           e.dataTransfer.effectAllowed = 'move';
+           e.dataTransfer.setData('text/plain', layer.id);
+        }
+        item.style.opacity = '0.5';
+      });
+      item.addEventListener('dragend', () => {
+        item.style.opacity = '1';
+        window._colorScopeDraggedLayerId = null;
+        $$('.layer-item').forEach(el => el.style.borderTop = el.style.borderBottom = '');
+        
+        // Execute the drop mutation SAFELY after all browser drag states have resolved
+        if (window._colorScopePendingDrop) {
+          const { dragId, dropId, placeBefore } = window._colorScopePendingDrop;
+          window._colorScopePendingDrop = null;
+          this.layerManager.moveLayer(dragId, dropId, placeBefore ? 'above' : 'below');
+        }
+      });
+      item.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+      });
+      item.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        // Visual indicator
+        const rect = item.getBoundingClientRect();
+        const mid = rect.top + rect.height / 2;
+        $$('.layer-item').forEach(el => el.style.borderTop = el.style.borderBottom = '');
+        if (e.clientY < mid) {
+          item.style.borderTop = '2px solid var(--accent)';
+        } else {
+          item.style.borderBottom = '2px solid var(--accent)';
+        }
+      });
+      item.addEventListener('dragleave', () => {
+        item.style.borderTop = item.style.borderBottom = '';
+      });
+      item.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const dragId = window._colorScopeDraggedLayerId || (e.dataTransfer ? e.dataTransfer.getData('text/plain') : null);
+        if (dragId && String(dragId) !== String(layer.id)) {
+          const rect = item.getBoundingClientRect();
+          const placeBefore = e.clientY < (rect.top + rect.height / 2);
+          
+          // DO NOT MUTATE DOM HERE. The browser drag engine is still running!
+          // Store the intent, and let `dragend` actually execute it safely.
+          window._colorScopePendingDrop = { dragId, dropId: layer.id, placeBefore };
+        }
+      });
+
+      item.addEventListener('click', () => {
+        this.layerManager.setActiveLayer(layer.id);
+        // Show properties for adjustment layers without auto-switching
+        if (isAdjust) {
+          this._renderAdjustLayerProps(layer, false);
+        } else {
+          this._clearPropertyPanel();
+        }
+      });
       list.appendChild(item);
+    }
+
+    this._syncPropertyPanelWithActiveLayer();
+  }
+
+  _syncPropertyPanelWithActiveLayer() {
+    const active = this.layerManager.getActiveLayer();
+    if (active && active.type === 'adjustment') {
+      this._renderAdjustLayerProps(active, false);
+      return;
+    }
+
+    if (this._propertyPanelState.type === 'adjustment') {
+      this._clearPropertyPanel();
     }
   }
 
@@ -514,9 +1216,9 @@ class ColorScopeApp {
     $('#btn-do-export')?.addEventListener('click', () => this._doExport());
   }
 
-  _doExport() {
+  async _doExport() {
     const format = $('.format-btn.active')?.dataset.format || 'png';
-    const source = $('#export-source')?.value || 'original';
+    const source = $('#export-source')?.value || 'display';
     const img = this.imageLoader.image;
     const imageData = this.imageLoader.imageData;
     if (!img || !imageData) return;
@@ -535,12 +1237,24 @@ class ColorScopeApp {
 
     if (source === 'original') {
       baseCtx.drawImage(img, 0, 0);
+    } else if (source === 'display') {
+      const comp = this.canvasEngine.getCompositeImageData();
+      if (comp) baseCtx.putImageData(comp, 0, 0);
+      else baseCtx.drawImage(img, 0, 0);
     } else {
       // Apply filter to raw imageData
       const src = imageData;
       const w = src.width, h = src.height;
       const dst = baseCtx.createImageData(w, h);
       const sd = src.data, dd = dst.data;
+      
+      // We may need saturationHeatColor
+      let satColorFn = null;
+      if (source === 'saturation') {
+        const { saturationHeatColor } = await import('./core/ColorMath.js');
+        satColorFn = saturationHeatColor;
+      }
+
       for (let i = 0; i < sd.length; i += 4) {
         const r = sd[i], g = sd[i+1], b = sd[i+2], a = sd[i+3];
         if (source === 'grayscale') {
@@ -548,12 +1262,10 @@ class ColorScopeApp {
           dd[i]=gray; dd[i+1]=gray; dd[i+2]=gray; dd[i+3]=a;
         } else if (source === 'saturation') {
           const max = Math.max(r,g,b), min = Math.min(r,g,b);
-          const sat = max === 0 ? 0 : (max-min)/max;
-          dd[i]=Math.round(255*Math.min(1,sat*2.5));
-          dd[i+1]=Math.round(255*Math.max(0,sat<0.4?sat*2.5:sat>0.7?(1-sat)*3.3:1));
-          dd[i+2]=Math.round(255*Math.max(0,1-sat*2));
-          dd[i+3]=a;
-        } else if (source === 'hue') {
+          const sat = max === 0 ? 0 : ((max-min)/max) * 100;
+          const [hr, hg, hb] = satColorFn(sat);
+          dd[i]=hr; dd[i+1]=hg; dd[i+2]=hb; dd[i+3]=a;
+        } else if (source === 'hue' || source === 'analogous' || source === 'complementary') {
           const max2=Math.max(r,g,b), min2=Math.min(r,g,b), d2=max2-min2;
           let hue=0;
           if(d2>0){
@@ -561,8 +1273,21 @@ class ColorScopeApp {
             else if(max2===g) hue=((b-r)/d2+2)/6*360;
             else hue=((r-g)/d2+4)/6*360;
           }
-          const hs=parseInt($('#hue-start')?.value||0), he=parseInt($('#hue-end')?.value||60);
-          const inR = hs<=he ? (hue>=hs&&hue<=he) : (hue>=hs||hue<=he);
+          
+          let inR = false;
+          if (source === 'hue') {
+            const hs = parseInt($('#prop-hue-start')?.value || 0);
+            const he = parseInt($('#prop-hue-end')?.value || 60);
+            inR = hs <= he ? (hue >= hs && hue <= he) : (hue >= hs || hue <= he);
+          } else {
+            const baseHue = parseInt($('#prop-harmony-hue')?.value || 0);
+            const tol = parseInt($('#prop-harmony-tol')?.value || 30);
+            let center = source === 'complementary' ? (baseHue + 180) % 360 : baseHue;
+            let start = (center - tol + 360) % 360;
+            let end = (center + tol) % 360;
+            inR = start <= end ? (hue >= start && hue <= end) : (hue >= start || hue <= end);
+          }
+          
           if(!inR || d2<10){
             const gr=Math.round(0.299*r+0.587*g+0.114*b);
             dd[i]=gr;dd[i+1]=gr;dd[i+2]=gr;dd[i+3]=a;
@@ -595,6 +1320,54 @@ class ColorScopeApp {
 
     let extraH = 0;
     const sections = []; // { draw: (ctx, y) => newY }
+
+    // --- Legend strip (for saturation/grayscale) ---
+    if (source === 'saturation' || source === 'grayscale') {
+      const stripH = 20;
+      const sectionH = panelPad + stripH + panelPad;
+      sections.push({ height: sectionH, draw: async (ctx, y) => {
+        ctx.fillStyle = panelBg;
+        ctx.fillRect(0, y, panelW, sectionH);
+        
+        ctx.font = panelFontBold;
+        ctx.fillStyle = panelText;
+        ctx.textAlign = 'left';
+        ctx.fillText(source === 'saturation' ? '飽和度熱圖 (0% - 100%)' : '灰階明度 (0% - 100%)', panelPad, y + panelPad + 14);
+        
+        const gradX = panelPad + 180;
+        const gradW = panelW - gradX - panelPad;
+        const gradY = y + panelPad;
+        
+        const grad = ctx.createLinearGradient(gradX, 0, gradX + gradW, 0);
+        if (source === 'grayscale') {
+          grad.addColorStop(0, '#000000');
+          grad.addColorStop(1, '#ffffff');
+        } else {
+          // Saturation
+          const { saturationHeatColor } = await import('./core/ColorMath.js');
+          for (let i = 0; i <= 20; i++) {
+            const pct = i * 5;
+            const [r, g, b] = saturationHeatColor(pct);
+            grad.addColorStop(i / 20, `rgb(${r},${g},${b})`);
+          }
+        }
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.roundRect(gradX, gradY, gradW, stripH, 4);
+        ctx.fill();
+        
+        // Min/Max labels
+        ctx.font = panelFontSmall;
+        ctx.fillStyle = source === 'grayscale' ? '#888' : '#fff';
+        ctx.textAlign = 'left';
+        ctx.fillText('0%', gradX + 6, gradY + 14);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#000';
+        ctx.fillText('100%', gradX + gradW - 6, gradY + 14);
+        ctx.textAlign = 'left'; // reset
+      }});
+      extraH += sectionH;
+    }
 
     // --- Palette strip ---
     if (includePalette) {
@@ -784,7 +1557,8 @@ class ColorScopeApp {
       // Panels
       let panelY = gridH;
       for (const sec of sections) {
-        sec.draw(ctx, panelY);
+        const res = sec.draw(ctx, panelY);
+        if (res instanceof Promise) await res;
         panelY += sec.height;
       }
 
@@ -805,7 +1579,8 @@ class ColorScopeApp {
 
     let panelY = img.height;
     for (const sec of sections) {
-      sec.draw(ctx, panelY);
+      const res = sec.draw(ctx, panelY);
+      if (res instanceof Promise) await res;
       panelY += sec.height;
     }
 

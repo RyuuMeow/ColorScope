@@ -31,9 +31,13 @@ export class ToolManager {
         case 'c': this.setTool('compare'); break;
         case 'r': this.setTool('region'); break;
         case 'n': this.setTool('note'); break;
+        case 'w': this.setTool('analogous_wand'); break;
+        case 'e': this.setTool('complementary_wand'); break;
         case 'g': this.toggleFilter('grayscale'); break;
         case 's': if (!e.ctrlKey) this.toggleFilter('saturation'); break;
         case 'h': this.toggleFilter('hue'); break;
+        case 'a': this.toggleFilter('analogous'); break;
+        case 'd': this.toggleFilter('complementary'); break;
       }
     });
 
@@ -64,6 +68,7 @@ export class ToolManager {
       this.activeFilters.delete(filterName);
       btn.classList.remove('filter-active');
       bus.emit('filter:clear');
+      bus.emit('filter:props-clear');
     } else {
       this.activeFilters.forEach(f => {
         $(`.tool-btn[data-filter="${f}"]`)?.classList.remove('filter-active');
@@ -71,18 +76,24 @@ export class ToolManager {
       this.activeFilters.clear();
       this.activeFilters.add(filterName);
       btn.classList.add('filter-active');
-      if (filterName === 'hue') bus.emit('filter:hue-dialog');
-      else bus.emit('filter:apply', { type: filterName });
+      
+      // Filters that need property panel controls
+      if (filterName === 'hue' || filterName === 'analogous' || filterName === 'complementary') {
+        bus.emit('filter:show-props', { filterName });
+      } else {
+        bus.emit('filter:props-clear');
+        bus.emit('filter:apply', { type: filterName });
+      }
     }
   }
 
   _updateCursor() {
     const container = $('#canvas-container');
     if (!container) return;
-    const classes = ['cursor-select', 'cursor-move', 'cursor-hand', 'cursor-pin', 'cursor-region', 'cursor-note', 'cursor-compare'];
+    const classes = ['cursor-select', 'cursor-default', 'cursor-hand', 'cursor-pin', 'cursor-region', 'cursor-note', 'cursor-compare'];
     container.classList.remove(...classes);
     const map = {
-      select: 'cursor-select', move: 'cursor-move', hand: 'cursor-hand',
+      select: 'cursor-select', move: 'cursor-default', hand: 'cursor-hand',
       pin: 'cursor-pin', region: 'cursor-region', note: 'cursor-note',
       compare: 'cursor-compare'
     };

@@ -8,6 +8,8 @@ export class ImageLoader {
   constructor() {
     this.image = null;
     this.imageData = null;
+    this.canvasEngine = null; // Reference to retrieve composite pixels
+    this._compositeCache = null; // Cached composite ImageData
     this.fileName = '';
     this._setup();
   }
@@ -57,6 +59,11 @@ export class ImageLoader {
         this.loadFile(file);
       }
     });
+
+    // Invalidate composite cache when layers/properties change
+    bus.on('layers:changed', () => { this._compositeCache = null; });
+    bus.on('layers:properties-changed', () => { this._compositeCache = null; });
+    bus.on('filter:applied', () => { this._compositeCache = null; });
   }
 
   loadFile(file) {
@@ -70,6 +77,7 @@ export class ImageLoader {
     const img = new Image();
     img.onload = () => {
       this.image = img;
+      this._compositeCache = null;
       // Extract ImageData
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = img.width;
@@ -91,6 +99,7 @@ export class ImageLoader {
 
   /**
    * Get pixel color at image coordinates (not screen coords)
+   * Uses cached composite data for performance
    */
   getPixel(x, y) {
     if (!this.imageData) return null;
@@ -99,8 +108,13 @@ export class ImageLoader {
     if (ix < 0 || iy < 0 || ix >= this.imageData.width || iy >= this.imageData.height) return null;
     
     let container = this.imageData.data;
-    if (window.app?.canvasEngine?.filteredImageData) {
-      container = window.app.canvasEngine.filteredImageData.data;
+    
+    // Use cached composite if available, generate once if needed
+    if (this.canvasEngine) {
+      if (!this._compositeCache) {
+        this._compositeCache = this.canvasEngine.getCompositeImageData();
+      }
+      if (this._compositeCache) container = this._compositeCache.data;
     }
     
     const i = (iy * this.imageData.width + ix) * 4;

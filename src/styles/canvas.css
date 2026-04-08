@@ -109,9 +109,73 @@
   white-space: nowrap;
 }
 
+/* ===== Filter Legend Bar ===== */
+.filter-legend {
+  position: absolute;
+  bottom: 34px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-default);
+  padding: 6px 12px;
+  border-radius: 20px;
+  box-shadow: var(--shadow-md);
+  z-index: 10;
+  pointer-events: none;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.filter-legend.hidden {
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px);
+}
+
+.filter-legend-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.filter-legend-bar {
+  position: relative;
+  width: 200px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+}
+
+.filter-legend-bar-bg {
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.filter-legend-arrow {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--text-primary);
+  transition: left 0.1s ease-out;
+}
+
+.filter-legend-value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  min-width: 32px;
+  text-align: right;
+}
+
+
 /* ===== Canvas Cursor Styles ===== */
-.canvas-container.cursor-select { cursor: default; }
-.canvas-container.cursor-move { cursor: default; }
+.canvas-container.cursor-select { cursor: crosshair; }
+.canvas-container.cursor-default { cursor: default; }
 .canvas-container.cursor-hand { cursor: grab; }
 .canvas-container.cursor-hand:active { cursor: grabbing; }
 .canvas-container.cursor-pin { cursor: crosshair; }

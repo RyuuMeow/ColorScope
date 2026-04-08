@@ -14,7 +14,13 @@ export class AdvancedAnalysisModal {
     this.close();
     if (!imageLoader || !imageLoader.imageData) return;
 
-    const imageData = imageLoader.imageData;
+    // Use composite (color-adjusted) if available, fallback to raw
+    let imageData = imageLoader.imageData;
+    if (imageLoader.canvasEngine) {
+      const comp = imageLoader.canvasEngine.getCompositeImageData();
+      if (comp) imageData = comp;
+    }
+
     
     // Create Backdrop
     this.modal = createElement('div', {
@@ -58,10 +64,15 @@ export class AdvancedAnalysisModal {
     // Left Column: Original image + Stats overview + Palette
     const leftCol = createElement('div', { style: { flex: '0 0 350px', display: 'flex', flexDirection: 'column', gap: '24px' }});
     
-    // 1. Image preview
+    // 1. Image preview (Using the actually analyzed composite data)
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = imageData.width;
+    tempCanvas.height = imageData.height;
+    tempCanvas.getContext('2d').putImageData(imageData, 0, 0);
+    
     const imgPreview = createElement('div', {
       style: { 
-        width: '100%', height: '240px', background: `url(${imageLoader.image.src}) center/contain no-repeat`,
+        width: '100%', height: '240px', background: `url(${tempCanvas.toDataURL('image/jpeg', 0.8)}) center/contain no-repeat`,
         borderRadius: 'var(--radius-md)', backgroundColor: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)'
       }
     });

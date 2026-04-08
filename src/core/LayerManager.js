@@ -21,6 +21,31 @@ export class LayerManager {
     const layer = {
       id: ++_layerIdCounter,
       name,
+      type: 'normal',
+      visible: true,
+      objects: []
+    };
+    this.layers.push(layer);
+    this.activeLayerId = layer.id;
+    bus.emit('layers:changed');
+    return layer;
+  }
+
+  addAdjustmentLayer(adjustType) {
+    const nameMap = { hsl: 'HSL 調整', levels: '色階調整', curves: '曲線調整 (Curves)', colorbalance: '色彩平衡', temperature: '色溫調整' };
+    const defaultParams = {
+      hsl: { hue: 0, saturation: 0, brightness: 0 },
+      levels: { contrast: 0, levelsMin: 0, levelsMax: 255, gamma: 1.0 },
+      curves: { points: [[0, 0], [128, 128], [255, 255]] },
+      colorbalance: { redCyan: 0, greenMagenta: 0, blueYellow: 0 },
+      temperature: { temperature: 0, tint: 0 }
+    };
+    const layer = {
+      id: ++_layerIdCounter,
+      name: nameMap[adjustType] || '調整圖層',
+      type: 'adjustment',
+      adjustType,
+      adjustParams: { ...(defaultParams[adjustType] || {}) },
       visible: true,
       objects: []
     };
@@ -39,6 +64,39 @@ export class LayerManager {
     bus.emit('layers:changed');
   }
 
+  moveLayer(layerIdOrDragId, targetOrDirection, position = null) {
+    const isDirectionMove = (position === null || position === undefined)
+      && (targetOrDirection === 1 || targetOrDirection === -1);
+
+    if (isDirectionMove) {
+      const idx = this.layers.findIndex(l => l.id === layerIdOrDragId);
+      if (idx < 0) return;
+      const newIdx = idx + targetOrDirection;
+      if (newIdx < 0 || newIdx >= this.layers.length) return;
+      [this.layers[idx], this.layers[newIdx]] = [this.layers[newIdx], this.layers[idx]];
+      bus.emit('layers:changed');
+      return;
+    }
+
+    const dragId = layerIdOrDragId;
+    const dropId = targetOrDirection;
+    const targetPosition = position === 'below' ? 'below' : 'above';
+    const dragIdx = this.layers.findIndex(l => String(l.id) === String(dragId));
+    const dropIdx = this.layers.findIndex(l => String(l.id) === String(dropId));
+    if (dragIdx === -1 || dropIdx === -1 || dragIdx === dropIdx) return;
+
+    const [dragLayer] = this.layers.splice(dragIdx, 1);
+    const targetIdx = this.layers.findIndex(l => String(l.id) === String(dropId));
+    if (targetIdx === -1) {
+      this.layers.splice(dragIdx, 0, dragLayer);
+      return;
+    }
+
+    const insertIdx = targetPosition === 'above' ? targetIdx + 1 : targetIdx;
+    this.layers.splice(insertIdx, 0, dragLayer);
+    bus.emit('layers:changed');
+  }
+
   renameLayer(layerId, name) {
     const layer = this.getLayer(layerId);
     if (layer) { layer.name = name; bus.emit('layers:changed'); }
@@ -51,15 +109,6 @@ export class LayerManager {
 
   setActiveLayer(layerId) {
     this.activeLayerId = layerId;
-    bus.emit('layers:changed');
-  }
-
-  moveLayer(layerId, direction) {
-    const idx = this.layers.findIndex(l => l.id === layerId);
-    if (idx < 0) return;
-    const newIdx = idx + direction;
-    if (newIdx < 0 || newIdx >= this.layers.length) return;
-    [this.layers[idx], this.layers[newIdx]] = [this.layers[newIdx], this.layers[idx]];
     bus.emit('layers:changed');
   }
 
@@ -198,14 +247,18 @@ export class LayerManager {
       activeLayerId: this.activeLayerId,
       layers: this.layers.map(l => ({
         id: l.id, name: l.name, visible: l.visible,
+        type: l.type || 'normal',
+        adjustType: l.adjustType || null,
+        adjustParams: l.adjustParams || null,
         objects: l.objects.map(o => o.serialize())
       }))
     };
   }
-
   deserialize(state) {
     if (!state || !state.layers) return;
+    let maxLayerId = 0;
     this.layers = state.layers.map(ls => {
+      if (ls.id > maxLayerId) maxLayerId = ls.id;
       const objects = [];
       let maxObjId = 0;
       for (const objData of ls.objects) {
@@ -216,8 +269,15 @@ export class LayerManager {
         }
       }
       resetObjectCounter(maxObjId);
-      return { id: ls.id, name: ls.name, visible: ls.visible, objects };
+      return {
+        id: ls.id, name: ls.name, visible: ls.visible,
+        type: ls.type || 'normal',
+        adjustType: ls.adjustType || null,
+        adjustParams: ls.adjustParams || null,
+        objects
+      };
     });
+    _layerIdCounter = maxLayerId;
     this.activeLayerId = state.activeLayerId;
     if (this.layers.length === 0) this.addLayer('預設');
     bus.emit('layers:changed');
