@@ -3,6 +3,7 @@
  */
 import { bus } from '../utils/EventBus.js';
 import { $, clamp } from '../utils/DOMUtils.js';
+import { generateLevelsLUT, interpolateSpline, createSVGFilterUrl, saturationHeatColor } from './ColorMath.js';
 
 export class CanvasEngine {
   constructor() {
@@ -34,9 +35,10 @@ export class CanvasEngine {
     this._rightClickStart = { x: 0, y: 0 };
     this._rightDragged = false;
 
-    // Filter
+    // Filter & Adjustments
     this._activeFilter = null;
     this._filteredImage = null;
+    this._cssFilter = 'none';
 
     this._resizeObserver = new ResizeObserver(() => this._resize());
     this._resizeObserver.observe(this.container);
@@ -48,6 +50,8 @@ export class CanvasEngine {
     bus.on('image:loaded', (data) => this._onImageLoaded(data));
     bus.on('filter:apply', (filter) => this._applyFilter(filter));
     bus.on('filter:clear', () => this._clearFilter());
+    bus.on('image:adjust:preview', (params) => this._previewAdjust(params));
+    bus.on('image:adjust:commit', (params) => this._commitAdjust(params));
   }
 
   setLayerManager(lm) {
@@ -76,6 +80,7 @@ export class CanvasEngine {
     this.imageData = data.imageData;
     this._activeFilter = null;
     this._filteredImage = null;
+    this._cssFilter = 'none';
     this._waitAndFit();
   }
 
@@ -287,10 +292,14 @@ export class CanvasEngine {
 
   // === Filters ===
   _applyFilter(filter) {
-    if (!this.imageData) return;
+    if (!this.image) return;
+
+    // Always compute from the unfiltered composite image to avoid cumulative
+    // grayscale degradation when the slider is dragged repeatedly.
+    const src = this.getCompositeImageData({ includeActiveFilter: false }) || this.imageData;
+    if (!src) return;
     this._activeFilter = filter.type;
 
-    const src = this.imageData;
     const w = src.width, h = src.height;
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = w; tempCanvas.height = h;
@@ -305,11 +314,9 @@ export class CanvasEngine {
         dd[i]=gray; dd[i+1]=gray; dd[i+2]=gray; dd[i+3]=a;
       } else if (filter.type === 'saturation') {
         const max = Math.max(r,g,b), min = Math.min(r,g,b);
-        const sat = max === 0 ? 0 : (max-min)/max;
-        dd[i]=Math.round(255*Math.min(1,sat*2.5));
-        dd[i+1]=Math.round(255*Math.max(0,sat<0.4?sat*2.5:sat>0.7?(1-sat)*3.3:1));
-        dd[i+2]=Math.round(255*Math.max(0,1-sat*2));
-        dd[i+3]=a;
+        const sat = max === 0 ? 0 : ((max-min)/max) * 100;
+        const [hr,hg,hb] = saturationHeatColor(sat);
+        dd[i]=hr; dd[i+1]=hg; dd[i+2]=hb; dd[i+3]=a;
       } else if (filter.type === 'hue') {
         const max2=Math.max(r,g,b), min2=Math.min(r,g,b), d2=max2-min2;
         let hue=0;
@@ -342,7 +349,55 @@ export class CanvasEngine {
     this._activeFilter = null;
     this._filteredImage = null;
     this.filteredImageData = null;
+    this._cssFilter = 'none';
     this.render();
+  }
+
+  // === Adjustments ===
+  _previewAdjust(params) {
+    // Map -100 to 100 sliders into percentages (default 100%)
+    const bri = 100 + params.brightness;
+    const con = 100 + params.contrast;
+    const sat = 100 + params.saturation;
+    const hue = params.hue; // -180 to 180 deg
+    
+    this._cssFilter = `brightness(${bri}%) contrast(${con}%) saturate(${sat}%) hue-rotate(${hue}deg)`;
+    this.render();
+  }
+
+  _commitAdjust(params) {
+    if (!this.image) return;
+    
+    // Create an offscreen canvas to permanently bake the CSS filter into image pixels
+    const canvas = document.createElement('canvas');
+    canvas.width = this.image.width;
+    canvas.height = this.image.height;
+    const ctx = canvas.getContext('2d');
+    
+    this._previewAdjust(params);
+    ctx.filter = this._cssFilter;
+    ctx.drawImage(this.image, 0, 0);
+    
+    this.imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    
+    const newImg = new Image();
+    newImg.onload = () => {
+      this.image = newImg;
+      this._cssFilter = 'none';
+      if (window.app && window.app.imageLoader) {
+         window.app.imageLoader.image = this.image;
+         window.app.imageLoader.imageData = this.imageData;
+      }
+      this.render();
+      // Auto trigger analysis update
+      bus.emit('image:loaded', {
+         image: this.image,
+         imageData: this.imageData,
+         dataURL: canvas.toDataURL(),
+         fileName: window.app ? window.app._currentFileName : 'adjusted.png'
+      });
+    };
+    newImg.src = canvas.toDataURL();
   }
 
   render() {
@@ -359,8 +414,16 @@ export class CanvasEngine {
     this.ctx.save();
     this.ctx.imageSmoothingEnabled = this.scale < 4;
     this.ctx.imageSmoothingQuality = 'high';
+    
+    // Build combined CSS filter from adjustment layers + manual cssFilter
+    let combinedFilter = this._buildCombinedFilter();
+    
+    const hasManualFilterActive = this._activeFilter && this._filteredImage;
+    // Don't apply SVG combined Filter if we are drawing the pre-baked manual filter image,
+    // otherwise the adjustments multiply onto the heatmap itself!
+    this.ctx.filter = hasManualFilterActive ? 'none' : combinedFilter;
 
-    const drawImg = (this._activeFilter && this._filteredImage) ? this._filteredImage : this.image;
+    const drawImg = hasManualFilterActive ? this._filteredImage : this.image;
     this.ctx.drawImage(drawImg, this.offsetX, this.offsetY, this.image.width * this.scale, this.image.height * this.scale);
     this.ctx.restore();
 
@@ -380,6 +443,61 @@ export class CanvasEngine {
       offsetY: this.offsetY,
       width: w, height: h
     });
+  }
+
+  /**
+   * Generates a full-resolution ImageData of the image WITH all adjustment CSS filters applied.
+   */
+  getCompositeImageData(options = {}) {
+    const { includeActiveFilter = true } = options;
+    if (!this.image) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = this.image.width;
+    canvas.height = this.image.height;
+    const ctx = canvas.getContext('2d');
+    
+    // Build combined CSS filter from adjustment layers + manual cssFilter
+    ctx.filter = this._buildCombinedFilter();
+    const useFiltered = includeActiveFilter && this._activeFilter && this._filteredImage;
+    const drawImg = useFiltered ? this._filteredImage : this.image;
+    ctx.drawImage(drawImg, 0, 0);
+    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  _buildCombinedFilter() {
+    let combinedFilter = this._cssFilter;
+    if (this.layerManager) {
+      const adjustFilters = [];
+      for (const layer of this.layerManager.layers) {
+        if (!layer.visible || layer.type !== 'adjustment') continue;
+        const p = layer.adjustParams;
+        if (layer.adjustType === 'hsl') {
+          adjustFilters.push(`brightness(${100 + (p.brightness||0)}%) saturate(${100 + (p.saturation||0)}%) hue-rotate(${p.hue||0}deg)`);
+        } else if (layer.adjustType === 'levels') {
+          // CSP Level matching: uses SVG lookup table mapped dynamically
+          const min = p.levelsMin || 0;
+          const max = p.levelsMax === undefined ? 255 : p.levelsMax;
+          const gamma = p.gamma === undefined ? 1.0 : p.gamma;
+          const lut = generateLevelsLUT(min, max, gamma);
+          adjustFilters.push(createSVGFilterUrl(lut));
+        } else if (layer.adjustType === 'curves') {
+          // CSP Curves matching: cubic spline interpolation mapped into LUT table
+          const points = p.points || [[0,0], [255,255]];
+          const lutData = interpolateSpline(points);
+          const lutStr = Array.from(lutData).map(v => v.toFixed(4)).join(' ');
+          adjustFilters.push(createSVGFilterUrl(lutStr));
+        } else if (layer.adjustType === 'colorbalance') {
+          const hueShift = ((p.redCyan||0) - (p.blueYellow||0)) * 0.5;
+          adjustFilters.push(`hue-rotate(${hueShift}deg) saturate(${100 + Math.abs(p.greenMagenta||0) * 0.3}%)`);
+        } else if (layer.adjustType === 'temperature') {
+          adjustFilters.push(`sepia(${Math.abs(p.temperature||0) * 0.3}%) hue-rotate(${(p.temperature||0) > 0 ? -10 : 10}deg)`);
+        }
+      }
+      if (adjustFilters.length > 0) {
+        combinedFilter = (combinedFilter !== 'none' ? combinedFilter + ' ' : '') + adjustFilters.join(' ');
+      }
+    }
+    return combinedFilter;
   }
 
   _updateStatus() {
