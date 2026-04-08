@@ -3,7 +3,7 @@
  */
 import { bus } from './utils/EventBus.js';
 import { $, $$, showModal, hideModal, createElement } from './utils/DOMUtils.js';
-import { rgbToHsl, rgbToHex, perceivedBrightness, colorName } from './core/ColorMath.js';
+import { rgbToHsl, rgbToHex, rgbToHsv, perceivedBrightness, colorName, saturationHeatColor } from './core/ColorMath.js';
 import { ImageLoader } from './core/ImageLoader.js';
 import { CanvasEngine } from './core/CanvasEngine.js';
 import { LayerManager } from './core/LayerManager.js';
@@ -48,11 +48,13 @@ class ColorScopeApp {
     this._currentFileName = '';
     this._currentHistoryId = null;
     this._propertyPanelState = { type: 'empty' };
+    this._filterSettings = this._createDefaultFilterSettings();
 
     this._initTheme();
     this._initEvents();
     this._initExport();
     this._initPanelTabs();
+    this._initPanelResize();
     this._initContextMenu();
     this._initLayerPanel();
     this._renderHomeGallery();
@@ -82,6 +84,85 @@ class ColorScopeApp {
     else { if (moon) moon.style.display = 'none'; if (sun) sun.style.display = ''; }
   }
 
+  _createDefaultFilterSettings() {
+    return {
+      hue: { start: 0, end: 60 },
+      analogous: { baseHue: 0, tol: 30 },
+      complementary: { baseHue: 0, tol: 30 }
+    };
+  }
+
+  _sanitizeFilterSettings(raw) {
+    const defaults = this._createDefaultFilterSettings();
+    if (!raw || typeof raw !== 'object') return defaults;
+
+    const toInt = (v, fallback) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    return {
+      hue: {
+        start: Math.max(0, Math.min(360, toInt(raw.hue?.start, defaults.hue.start))),
+        end: Math.max(0, Math.min(360, toInt(raw.hue?.end, defaults.hue.end)))
+      },
+      analogous: {
+        baseHue: Math.max(0, Math.min(360, toInt(raw.analogous?.baseHue, defaults.analogous.baseHue))),
+        tol: Math.max(5, Math.min(90, toInt(raw.analogous?.tol, defaults.analogous.tol)))
+      },
+      complementary: {
+        baseHue: Math.max(0, Math.min(360, toInt(raw.complementary?.baseHue, defaults.complementary.baseHue))),
+        tol: Math.max(5, Math.min(90, toInt(raw.complementary?.tol, defaults.complementary.tol)))
+      }
+    };
+  }
+
+  _getActiveFilterName() {
+    return this.toolManager?.activeFilters?.size ? [...this.toolManager.activeFilters][0] : null;
+  }
+
+  _getFilterRange(filterName) {
+    if (filterName === 'hue') {
+      const { start, end } = this._filterSettings.hue;
+      return { hueStart: start, hueEnd: end };
+    }
+    if (filterName === 'analogous' || filterName === 'complementary') {
+      const cfg = this._filterSettings[filterName];
+      const center = filterName === 'complementary' ? (cfg.baseHue + 180) % 360 : cfg.baseHue;
+      return {
+        hueStart: (center - cfg.tol + 360) % 360,
+        hueEnd: (center + cfg.tol) % 360
+      };
+    }
+    return { hueStart: 0, hueEnd: 60 };
+  }
+
+  _captureCanvasState() {
+    return {
+      layerState: this.layerManager.serialize(),
+      filterSettings: this._sanitizeFilterSettings(this._filterSettings),
+      activeFilter: this._getActiveFilterName()
+    };
+  }
+
+  _restoreCanvasState(savedState) {
+    const layerState = savedState?.layerState || savedState;
+    if (layerState?.layers) {
+      this.layerManager.deserialize(layerState);
+    }
+
+    this._filterSettings = this._sanitizeFilterSettings(savedState?.filterSettings);
+
+    const savedFilter = savedState?.activeFilter;
+    if (savedFilter) {
+      requestAnimationFrame(() => {
+        if (!this.toolManager.activeFilters.has(savedFilter)) {
+          this.toolManager.toggleFilter(savedFilter);
+        }
+      });
+    }
+  }
+
   // ===== Events =====
   _initEvents() {
     bus.on('image:loaded', (data) => {
@@ -106,8 +187,9 @@ class ColorScopeApp {
 
       this._currentHistoryId = null;
       this.layerManager.clearAll();
+      this._filterSettings = this._createDefaultFilterSettings();
       if (data.state) {
-        this.layerManager.deserialize(data.state);
+        this._restoreCanvasState(data.state);
       }
 
       setTimeout(() => this._runAnalysis(data.imageData), 100);
@@ -115,14 +197,24 @@ class ColorScopeApp {
     });
 
     bus.on('canvas:mousemove', (pos) => {
-      const pixel = this.imageLoader.getPixel(pos.imgX, pos.imgY);
-      this._updateHUD(pixel, pos);
+      const displayPixel = this.imageLoader.getPixel(pos.imgX, pos.imgY, { includeActiveFilter: true });
+      const metricPixel = this.canvasEngine._activeFilter === 'saturation'
+        ? this.imageLoader.getPixel(pos.imgX, pos.imgY, { includeActiveFilter: false })
+        : displayPixel;
+
+      this._updateHUD(displayPixel, pos, metricPixel);
       this._updateStatusPos(pos.imgX, pos.imgY);
-      this._updateFilterLegendArrow(pixel);
+      this._updateFilterLegendArrow(displayPixel, metricPixel);
     });
 
-    bus.on('filter:apply', (filter) => this._updateFilterLegend(filter.type));
-    bus.on('filter:clear', () => this._updateFilterLegend(null));
+    bus.on('filter:apply', (filter) => {
+      this._updateFilterLegend(filter.type);
+      this._saveCurrentState();
+    });
+    bus.on('filter:clear', () => {
+      this._updateFilterLegend(null);
+      this._saveCurrentState();
+    });
     
     // Filter property panel
     bus.on('filter:show-props', ({ filterName }) => this._renderFilterProps(filterName));
@@ -193,25 +285,78 @@ class ColorScopeApp {
     const history = this._getHistory();
     const entry = history.find(h => h.id === this._currentHistoryId);
     if (entry) {
-      entry.state = this.layerManager.serialize();
+      entry.state = this._captureCanvasState();
       this._setHistory(history);
     }
   }
 
-  _updateHUD(pixel, pos) {
+  _updateHUD(pixel, pos, metricPixel = pixel) {
     const hud = $('#color-hud');
     
     const isMenuOpen = $('#context-menu') && !$('#context-menu').classList.contains('hidden');
     const isSelectTool = bus._currentTool === 'move';
-    const isSatFilter = this.canvasEngine._activeFilter === 'saturation';
     const isRightDragging = this.canvasEngine.isPanning || this.canvasEngine._rightBtnDown;
     
-    if (!pixel || !isSelectTool || isMenuOpen || isSatFilter || isRightDragging) { 
+    if (!pixel || !isSelectTool || isMenuOpen || isRightDragging) { 
       hud.classList.add('hidden'); 
       return; 
     }
     
     hud.classList.remove('hidden');
+    const activeFilter = this.canvasEngine._activeFilter;
+    const rowHex = $('#hud-hex')?.closest('.hud-row');
+    const rowRgb = $('#hud-rgb')?.closest('.hud-row');
+    const rowHsl = $('#hud-hsl')?.closest('.hud-row');
+    const rowBrightness = $('#hud-brightness')?.closest('.hud-row');
+    const hexLabel = rowHex?.querySelector('.hud-label');
+    const brightLabel = rowBrightness?.querySelector('.hud-label');
+
+    const setCompactMode = (enabled) => {
+      if (rowHex) rowHex.style.display = '';
+      if (rowRgb) rowRgb.style.display = enabled ? 'none' : '';
+      if (rowHsl) rowHsl.style.display = enabled ? 'none' : '';
+      if (rowBrightness) rowBrightness.style.display = enabled ? 'none' : '';
+    };
+
+    if (activeFilter === 'grayscale') {
+      const gray = Math.round(0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
+      const grayPct = Math.round((gray / 255) * 100);
+      setCompactMode(true);
+      if (hexLabel) hexLabel.textContent = '灰階';
+      $('#hud-name').textContent = '灰階模式';
+      $('#hud-preview').style.backgroundColor = `rgb(${gray}, ${gray}, ${gray})`;
+      $('#hud-hex').textContent = `${grayPct}%`;
+      const offset = 20;
+      let x = pos.screenX + offset, y = pos.screenY + offset;
+      const hudRect = hud.getBoundingClientRect();
+      if (x + hudRect.width > window.innerWidth - 10) x = pos.screenX - hudRect.width - offset;
+      if (y + hudRect.height > window.innerHeight - 10) y = pos.screenY - hudRect.height - offset;
+      hud.style.left = x + 'px';
+      hud.style.top = y + 'px';
+      return;
+    }
+
+    if (activeFilter === 'saturation') {
+      const sourcePixel = metricPixel || pixel;
+      const satPct = Math.round(rgbToHsv(sourcePixel.r, sourcePixel.g, sourcePixel.b).s);
+      setCompactMode(true);
+      if (hexLabel) hexLabel.textContent = '飽和度';
+      $('#hud-name').textContent = '飽和度模式';
+      $('#hud-preview').style.backgroundColor = rgbToHex(pixel.r, pixel.g, pixel.b);
+      $('#hud-hex').textContent = `${satPct}%`;
+      const offset = 20;
+      let x = pos.screenX + offset, y = pos.screenY + offset;
+      const hudRect = hud.getBoundingClientRect();
+      if (x + hudRect.width > window.innerWidth - 10) x = pos.screenX - hudRect.width - offset;
+      if (y + hudRect.height > window.innerHeight - 10) y = pos.screenY - hudRect.height - offset;
+      hud.style.left = x + 'px';
+      hud.style.top = y + 'px';
+      return;
+    }
+
+    setCompactMode(false);
+    if (hexLabel) hexLabel.textContent = 'HEX';
+    if (brightLabel) brightLabel.textContent = '明度';
 
     const hex = rgbToHex(pixel.r, pixel.g, pixel.b);
     const hsl = rgbToHsl(pixel.r, pixel.g, pixel.b);
@@ -271,7 +416,7 @@ class ColorScopeApp {
     }
   }
 
-  _updateFilterLegendArrow(pixel) {
+  _updateFilterLegendArrow(pixel, metricPixel = pixel) {
     const legend = $('#filter-legend');
     if (!legend || legend.classList.contains('hidden') || !pixel) return;
 
@@ -285,13 +430,10 @@ class ColorScopeApp {
       pct = (gray / 255) * 100;
       valText.textContent = Math.round(pct) + '%';
     } else if (type === 'saturation') {
-      import('./core/ColorMath.js').then(({ rgbToHsv }) => {
-        const hsv = rgbToHsv(pixel.r, pixel.g, pixel.b);
-        pct = hsv.s;
-        arrow.style.left = `${pct}%`;
-        valText.textContent = Math.round(pct) + '%';
-      });
-      return; // Async update for saturation
+      const sourcePixel = metricPixel || pixel;
+      const hsv = rgbToHsv(sourcePixel.r, sourcePixel.g, sourcePixel.b);
+      pct = hsv.s;
+      valText.textContent = Math.round(pct) + '%';
     }
 
     arrow.style.left = `${pct}%`;
@@ -410,6 +552,85 @@ class ColorScopeApp {
     });
   }
 
+  _initPanelResize() {
+    const divider = $('#panel-zone-divider');
+    const sidePanel = $('#side-panel');
+    const upper = $('.panel-zone-upper');
+    const lower = $('.panel-zone-lower');
+    if (!divider || !sidePanel || !upper || !lower) return;
+
+    const storageKey = 'colorscope-panel-upper-ratio';
+    const minZonePx = 120;
+
+    const applyRatio = (ratio) => {
+      const panelHeight = sidePanel.getBoundingClientRect().height;
+      const dividerHeight = divider.getBoundingClientRect().height || 3;
+      const available = panelHeight - dividerHeight;
+      if (available <= minZonePx * 2) return;
+
+      const minRatio = minZonePx / available;
+      const clampedRatio = Math.max(minRatio, Math.min(1 - minRatio, ratio));
+      const upperPx = available * clampedRatio;
+      const lowerPx = available - upperPx;
+
+      upper.style.flex = `0 0 ${upperPx}px`;
+      lower.style.flex = `0 0 ${lowerPx}px`;
+    };
+
+    const readStoredRatio = () => {
+      const raw = localStorage.getItem(storageKey);
+      const parsed = raw ? Number(raw) : NaN;
+      return Number.isFinite(parsed) ? parsed : 0.52;
+    };
+
+    const writeStoredRatio = () => {
+      const panelHeight = sidePanel.getBoundingClientRect().height;
+      const dividerHeight = divider.getBoundingClientRect().height || 3;
+      const available = panelHeight - dividerHeight;
+      if (available <= 0) return;
+      const upperHeight = upper.getBoundingClientRect().height;
+      localStorage.setItem(storageKey, String(upperHeight / available));
+    };
+
+    applyRatio(readStoredRatio());
+    window.addEventListener('resize', () => applyRatio(readStoredRatio()));
+    bus.on('image:loaded', () => requestAnimationFrame(() => applyRatio(readStoredRatio())));
+
+    divider.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+
+      const startY = e.clientY;
+      const startUpper = upper.getBoundingClientRect().height;
+      const panelHeight = sidePanel.getBoundingClientRect().height;
+      const dividerHeight = divider.getBoundingClientRect().height || 3;
+      const available = panelHeight - dividerHeight;
+      if (available <= minZonePx * 2) return;
+
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'row-resize';
+
+      const onMove = (ev) => {
+        const delta = ev.clientY - startY;
+        const nextUpper = Math.max(minZonePx, Math.min(available - minZonePx, startUpper + delta));
+        const nextLower = available - nextUpper;
+        upper.style.flex = `0 0 ${nextUpper}px`;
+        lower.style.flex = `0 0 ${nextLower}px`;
+      };
+
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+        writeStoredRatio();
+      };
+
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+  }
+
   _switchToTab(zone, tabName) {
     const zoneEl = $(`.panel-zone-${zone}`);
     if (!zoneEl) return;
@@ -451,42 +672,45 @@ class ColorScopeApp {
     let html = `<h3 class="section-title">${labels[filterName] || filterName}</h3>`;
 
     if (isHue) {
+      const hueStartVal = this._filterSettings.hue.start;
+      const hueEndVal = this._filterSettings.hue.end;
       html += `
         <div class="property-slider-group">
           <div class="hue-range-bar hue-range-bar-compact" id="prop-hue-range-bar"></div>
         </div>
         <label class="property-slider-group">
           <div class="property-slider-head">
-            <span class="property-slider-label">起始色相</span><span class="property-slider-value" id="prop-hue-start-val">0°</span>
+            <span class="property-slider-label">起始色相</span><span class="property-slider-value" id="prop-hue-start-val">${hueStartVal}°</span>
           </div>
-          <input class="property-slider" type="range" id="prop-hue-start" min="0" max="360" value="0">
+          <input class="property-slider" type="range" id="prop-hue-start" min="0" max="360" value="${hueStartVal}">
         </label>
         <label class="property-slider-group">
           <div class="property-slider-head">
-            <span class="property-slider-label">結束色相</span><span class="property-slider-value" id="prop-hue-end-val">60°</span>
+            <span class="property-slider-label">結束色相</span><span class="property-slider-value" id="prop-hue-end-val">${hueEndVal}°</span>
           </div>
-          <input class="property-slider" type="range" id="prop-hue-end" min="0" max="360" value="60">
+          <input class="property-slider" type="range" id="prop-hue-end" min="0" max="360" value="${hueEndVal}">
         </label>
       `;
     }
 
     if (isHarmony) {
+      const harmonyCfg = this._filterSettings[filterName] || { baseHue: 0, tol: 30 };
       html += `
         <p class="property-intro">
           ${filterName === 'analogous' ? '高亮與基準色相鄰的色彩，其餘灰階化。' : '高亮基準色的互補色（對向 180°），其餘灰階化。'}
         </p>
         <label class="property-slider-group">
           <div class="property-slider-head">
-            <span class="property-slider-label">基準色相</span><span class="property-slider-value" id="prop-harmony-hue-val">0°</span>
+            <span class="property-slider-label">基準色相</span><span class="property-slider-value" id="prop-harmony-hue-val">${harmonyCfg.baseHue}°</span>
           </div>
-          <input class="property-slider" type="range" id="prop-harmony-hue" min="0" max="360" value="0">
-          <div id="prop-harmony-preview" class="property-preview-chip" style="background:hsl(0,100%,50%);"></div>
+          <input class="property-slider" type="range" id="prop-harmony-hue" min="0" max="360" value="${harmonyCfg.baseHue}">
+          <div id="prop-harmony-preview" class="property-preview-chip" style="background:hsl(${harmonyCfg.baseHue},100%,50%);"></div>
         </label>
         <label class="property-slider-group">
           <div class="property-slider-head">
-            <span class="property-slider-label">容差角度</span><span class="property-slider-value" id="prop-harmony-tol-val">±30°</span>
+            <span class="property-slider-label">容差角度</span><span class="property-slider-value" id="prop-harmony-tol-val">±${harmonyCfg.tol}°</span>
           </div>
-          <input class="property-slider" type="range" id="prop-harmony-tol" min="5" max="90" value="30">
+          <input class="property-slider" type="range" id="prop-harmony-tol" min="5" max="90" value="${harmonyCfg.tol}">
         </label>
       `;
     }
@@ -498,9 +722,11 @@ class ColorScopeApp {
       const hs = $('#prop-hue-start'), he = $('#prop-hue-end');
       const applyHue = () => {
         const s = parseInt(hs.value), e = parseInt(he.value);
+        this._filterSettings.hue.start = s;
+        this._filterSettings.hue.end = e;
         $('#prop-hue-start-val').textContent = s + '°';
         $('#prop-hue-end-val').textContent = e + '°';
-        bus.emit('filter:apply', { type: 'hue', params: { hueStart: s, hueEnd: e } });
+        bus.emit('filter:apply', { type: 'hue', params: this._getFilterRange('hue') });
       };
       hs.addEventListener('input', applyHue);
       he.addEventListener('input', applyHue);
@@ -512,14 +738,12 @@ class ColorScopeApp {
       const applyHarmony = () => {
         const baseHue = parseInt(hueSlider.value);
         const tol = parseInt(tolSlider.value);
+        this._filterSettings[filterName] = { baseHue, tol };
         $('#prop-harmony-hue-val').textContent = baseHue + '°';
         $('#prop-harmony-tol-val').textContent = `±${tol}°`;
         $('#prop-harmony-preview').style.background = `hsl(${baseHue}, 100%, 50%)`;
 
-        let center = filterName === 'complementary' ? (baseHue + 180) % 360 : baseHue;
-        let start = (center - tol + 360) % 360;
-        let end = (center + tol) % 360;
-        bus.emit('filter:apply', { type: 'hue', params: { hueStart: start, hueEnd: end } });
+        bus.emit('filter:apply', { type: 'hue', params: this._getFilterRange(filterName) });
       };
       hueSlider.addEventListener('input', applyHarmony);
       tolSlider.addEventListener('input', applyHarmony);
@@ -1276,15 +1500,10 @@ class ColorScopeApp {
           
           let inR = false;
           if (source === 'hue') {
-            const hs = parseInt($('#prop-hue-start')?.value || 0);
-            const he = parseInt($('#prop-hue-end')?.value || 60);
+            const { hueStart: hs, hueEnd: he } = this._getFilterRange('hue');
             inR = hs <= he ? (hue >= hs && hue <= he) : (hue >= hs || hue <= he);
           } else {
-            const baseHue = parseInt($('#prop-harmony-hue')?.value || 0);
-            const tol = parseInt($('#prop-harmony-tol')?.value || 30);
-            let center = source === 'complementary' ? (baseHue + 180) % 360 : baseHue;
-            let start = (center - tol + 360) % 360;
-            let end = (center + tol) % 360;
+            const { hueStart: start, hueEnd: end } = this._getFilterRange(source);
             inR = start <= end ? (hue >= start && hue <= end) : (hue >= start || hue <= end);
           }
           
@@ -1512,11 +1731,13 @@ class ColorScopeApp {
 
     // === Step 4: Full analysis composite (special source) ===
     if (source === 'analysis') {
-      // For analysis mode, compose a 2x2 grid + panels
-      const halfW = Math.ceil(img.width / 2);
-      const halfH = Math.ceil(img.height / 2);
-      const gridW = halfW * 2;
-      const gridH = halfH * 2;
+      // For analysis mode, compose a 3x2 grid + panels
+      const cols = 3;
+      const rows = 2;
+      const cellW = Math.ceil(img.width / cols);
+      const cellH = Math.ceil(img.height / rows);
+      const gridW = cellW * cols;
+      const gridH = cellH * rows;
       const labelBarH = 24;
 
       const ec = document.createElement('canvas');
@@ -1524,35 +1745,49 @@ class ColorScopeApp {
       ec.height = gridH + labelBarH * 2 + extraH;
       const ctx = ec.getContext('2d');
 
-      // Draw 4 quadrants
-      const drawQuad = (srcCanvas, x, y, label) => {
-        ctx.drawImage(srcCanvas, x, y, halfW, halfH);
+      const drawCell = (srcCanvas, col, row, label) => {
+        const x = col * cellW;
+        const y = row * cellH;
+        const drawAreaX = x;
+        const drawAreaY = y + labelBarH;
+        const drawAreaW = cellW;
+        const drawAreaH = Math.max(1, cellH - labelBarH);
+        const srcW = Math.max(1, srcCanvas.width || 1);
+        const srcH = Math.max(1, srcCanvas.height || 1);
+        const scale = Math.min(drawAreaW / srcW, drawAreaH / srcH);
+        const drawW = srcW * scale;
+        const drawH = srcH * scale;
+        const dx = drawAreaX + (drawAreaW - drawW) / 2;
+        const dy = drawAreaY + (drawAreaH - drawH) / 2;
+
+        // Keep aspect ratio to avoid squeezing in analysis export grid cells.
+        ctx.fillStyle = '#0f1322';
+        ctx.fillRect(x, y, cellW, cellH);
+        ctx.drawImage(srcCanvas, dx, dy, drawW, drawH);
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(x, y, halfW, labelBarH);
+        ctx.fillRect(x, y, cellW, labelBarH);
         ctx.font = panelFontBold;
         ctx.fillStyle = '#fff';
         ctx.textAlign = 'center';
-        ctx.fillText(label, x + halfW / 2, y + 16);
+        ctx.fillText(label, x + cellW / 2, y + 16);
         ctx.textAlign = 'left';
       };
 
-      // Original
       const origC = document.createElement('canvas');
       origC.width = img.width; origC.height = img.height;
       origC.getContext('2d').drawImage(img, 0, 0);
-      drawQuad(origC, 0, 0, '原圖 Original');
-
-      // Grayscale
       const grayC = this._applyFilterToCanvas(imageData, 'grayscale');
-      drawQuad(grayC, halfW, 0, '灰階 Grayscale');
-
-      // Saturation
       const satC = this._applyFilterToCanvas(imageData, 'saturation');
-      drawQuad(satC, 0, halfH, '飽和度 Saturation');
+      const hueC = this._applyFilterToCanvas(imageData, 'hue', { hueRange: this._getFilterRange('hue') });
+      const anaC = this._applyFilterToCanvas(imageData, 'analogous', { hueRange: this._getFilterRange('analogous') });
+      const cmpC = this._applyFilterToCanvas(imageData, 'complementary', { hueRange: this._getFilterRange('complementary') });
 
-      // Hue isolation
-      const hueC = this._applyFilterToCanvas(imageData, 'hue');
-      drawQuad(hueC, halfW, halfH, '色相隔離 Hue Isolation');
+      drawCell(origC, 0, 0, '原圖 Original');
+      drawCell(grayC, 1, 0, '灰階 Grayscale');
+      drawCell(satC, 2, 0, '飽和度 Saturation');
+      drawCell(hueC, 0, 1, '色相隔離 Hue');
+      drawCell(anaC, 1, 1, '相似色 Analogous');
+      drawCell(cmpC, 2, 1, '對比色 Complementary');
 
       // Panels
       let panelY = gridH;
@@ -1592,7 +1827,8 @@ class ColorScopeApp {
   }
 
   /** Helper: apply a filter type to imageData and return a canvas */
-  _applyFilterToCanvas(imageData, filterType) {
+  _applyFilterToCanvas(imageData, filterType, options = {}) {
+    const hueRange = options.hueRange || this._getFilterRange(filterType);
     const w = imageData.width, h = imageData.height;
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
@@ -1606,12 +1842,11 @@ class ColorScopeApp {
         dd[i]=gray; dd[i+1]=gray; dd[i+2]=gray; dd[i+3]=a;
       } else if (filterType === 'saturation') {
         const max = Math.max(r,g,b), min = Math.min(r,g,b);
-        const sat = max === 0 ? 0 : (max-min)/max;
-        dd[i]=Math.round(255*Math.min(1,sat*2.5));
-        dd[i+1]=Math.round(255*Math.max(0,sat<0.4?sat*2.5:sat>0.7?(1-sat)*3.3:1));
-        dd[i+2]=Math.round(255*Math.max(0,1-sat*2));
+        const sat = max === 0 ? 0 : ((max-min)/max) * 100;
+        const [hr, hg, hb] = saturationHeatColor(sat);
+        dd[i]=hr; dd[i+1]=hg; dd[i+2]=hb;
         dd[i+3]=a;
-      } else if (filterType === 'hue') {
+      } else if (filterType === 'hue' || filterType === 'analogous' || filterType === 'complementary') {
         const max2=Math.max(r,g,b), min2=Math.min(r,g,b), d2=max2-min2;
         let hue=0;
         if(d2>0){
@@ -1619,7 +1854,8 @@ class ColorScopeApp {
           else if(max2===g) hue=((b-r)/d2+2)/6*360;
           else hue=((r-g)/d2+4)/6*360;
         }
-        const hs=parseInt($('#hue-start')?.value||0), he=parseInt($('#hue-end')?.value||60);
+        const hs = hueRange?.hueStart ?? 0;
+        const he = hueRange?.hueEnd ?? 60;
         const inR = hs<=he ? (hue>=hs&&hue<=he) : (hue>=hs||hue<=he);
         if(!inR || d2<10){
           const gr=Math.round(0.299*r+0.587*g+0.114*b);
@@ -1653,7 +1889,7 @@ class ColorScopeApp {
         dataURL: data.dataURL,
         date: new Date().toLocaleDateString('zh-TW'),
         timestamp: Date.now(),
-        state: existing?.state || null
+        state: data.state || existing?.state || null
       };
 
       const idx = history.findIndex(h => h.id === id);

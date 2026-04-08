@@ -458,9 +458,21 @@ export class CanvasEngine {
     
     // Build combined CSS filter from adjustment layers + manual cssFilter
     ctx.filter = this._buildCombinedFilter();
-    const useFiltered = includeActiveFilter && this._activeFilter && this._filteredImage;
-    const drawImg = useFiltered ? this._filteredImage : this.image;
-    ctx.drawImage(drawImg, 0, 0);
+    const useFiltered = includeActiveFilter && this._activeFilter;
+
+    if (useFiltered && this.filteredImageData) {
+      // Use synchronous pixel buffer first so color picking and legends always
+      // match the latest displayed filter state without waiting for Image.onload.
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = this.filteredImageData.width;
+      srcCanvas.height = this.filteredImageData.height;
+      srcCanvas.getContext('2d').putImageData(this.filteredImageData, 0, 0);
+      ctx.drawImage(srcCanvas, 0, 0);
+    } else if (useFiltered && this._filteredImage && this._filteredImage.complete && this._filteredImage.naturalWidth > 0) {
+      ctx.drawImage(this._filteredImage, 0, 0);
+    } else {
+      ctx.drawImage(this.image, 0, 0);
+    }
     return ctx.getImageData(0, 0, canvas.width, canvas.height);
   }
 

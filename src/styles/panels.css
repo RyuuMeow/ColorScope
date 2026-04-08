@@ -31,13 +31,27 @@
 }
 
 .panel-zone-divider {
-  height: 3px;
-  background: var(--border-subtle);
+  height: 8px;
+  background: transparent;
   cursor: row-resize;
   flex-shrink: 0;
+  position: relative;
   transition: background var(--transition-fast);
 }
+.panel-zone-divider::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  background: var(--border-subtle);
+}
 .panel-zone-divider:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+.panel-zone-divider:hover::before {
   background: var(--accent);
 }
 

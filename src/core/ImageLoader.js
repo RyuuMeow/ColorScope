@@ -9,7 +9,8 @@ export class ImageLoader {
     this.image = null;
     this.imageData = null;
     this.canvasEngine = null; // Reference to retrieve composite pixels
-    this._compositeCache = null; // Cached composite ImageData
+    this._compositeCache = null; // Cached composite ImageData (with active filter)
+    this._compositeBaseCache = null; // Cached composite ImageData (without active filter)
     this.fileName = '';
     this._setup();
   }
@@ -60,10 +61,20 @@ export class ImageLoader {
       }
     });
 
-    // Invalidate composite cache when layers/properties change
-    bus.on('layers:changed', () => { this._compositeCache = null; });
-    bus.on('layers:properties-changed', () => { this._compositeCache = null; });
-    bus.on('filter:applied', () => { this._compositeCache = null; });
+    const invalidateCompositeCache = () => {
+      this._compositeCache = null;
+      this._compositeBaseCache = null;
+    };
+
+    // Invalidate composite cache whenever display-affecting state changes.
+    bus.on('image:loaded', invalidateCompositeCache);
+    bus.on('layers:changed', invalidateCompositeCache);
+    bus.on('layers:properties-changed', invalidateCompositeCache);
+    bus.on('filter:apply', invalidateCompositeCache);
+    bus.on('filter:applied', invalidateCompositeCache); // backward compatibility
+    bus.on('filter:clear', invalidateCompositeCache);
+    bus.on('image:adjust:preview', invalidateCompositeCache);
+    bus.on('image:adjust:commit', invalidateCompositeCache);
   }
 
   loadFile(file) {
@@ -78,6 +89,7 @@ export class ImageLoader {
     img.onload = () => {
       this.image = img;
       this._compositeCache = null;
+      this._compositeBaseCache = null;
       // Extract ImageData
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = img.width;
@@ -101,7 +113,8 @@ export class ImageLoader {
    * Get pixel color at image coordinates (not screen coords)
    * Uses cached composite data for performance
    */
-  getPixel(x, y) {
+  getPixel(x, y, options = {}) {
+    const { includeActiveFilter = true } = options;
     if (!this.imageData) return null;
     const ix = Math.floor(x);
     const iy = Math.floor(y);
@@ -109,12 +122,26 @@ export class ImageLoader {
     
     let container = this.imageData.data;
     
-    // Use cached composite if available, generate once if needed
+    // Use cached composite if available, generate once if needed.
+    // Guard against stale caches from image-size changes.
     if (this.canvasEngine) {
-      if (!this._compositeCache) {
-        this._compositeCache = this.canvasEngine.getCompositeImageData();
+      const cache = includeActiveFilter ? this._compositeCache : this._compositeBaseCache;
+      if (cache && (cache.width !== this.imageData.width || cache.height !== this.imageData.height)) {
+        if (includeActiveFilter) this._compositeCache = null;
+        else this._compositeBaseCache = null;
       }
-      if (this._compositeCache) container = this._compositeCache.data;
+
+      if (includeActiveFilter) {
+        if (!this._compositeCache) {
+          this._compositeCache = this.canvasEngine.getCompositeImageData();
+        }
+        if (this._compositeCache) container = this._compositeCache.data;
+      } else {
+        if (!this._compositeBaseCache) {
+          this._compositeBaseCache = this.canvasEngine.getCompositeImageData({ includeActiveFilter: false });
+        }
+        if (this._compositeBaseCache) container = this._compositeBaseCache.data;
+      }
     }
     
     const i = (iy * this.imageData.width + ix) * 4;
