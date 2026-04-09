@@ -37,7 +37,9 @@ export class CanvasEngine {
 
     // Filter & Adjustments
     this._activeFilter = null;
+    this._lastFilterPayload = null;
     this._filteredImage = null;
+    this._filteredCanvas = null;
     this._cssFilter = 'none';
 
     this._resizeObserver = new ResizeObserver(() => this._resize());
@@ -50,6 +52,8 @@ export class CanvasEngine {
     bus.on('image:loaded', (data) => this._onImageLoaded(data));
     bus.on('filter:apply', (filter) => this._applyFilter(filter));
     bus.on('filter:clear', () => this._clearFilter());
+    bus.on('layers:changed', () => this._reapplyActiveFilter());
+    bus.on('layers:properties-changed', () => this._reapplyActiveFilter());
     bus.on('image:adjust:preview', (params) => this._previewAdjust(params));
     bus.on('image:adjust:commit', (params) => this._commitAdjust(params));
   }
@@ -79,7 +83,9 @@ export class CanvasEngine {
     this.image = data.image;
     this.imageData = data.imageData;
     this._activeFilter = null;
+    this._lastFilterPayload = null;
     this._filteredImage = null;
+    this._filteredCanvas = null;
     this._cssFilter = 'none';
     this._waitAndFit();
   }
@@ -299,6 +305,10 @@ export class CanvasEngine {
     const src = this.getCompositeImageData({ includeActiveFilter: false }) || this.imageData;
     if (!src) return;
     this._activeFilter = filter.type;
+    this._lastFilterPayload = {
+      type: filter.type,
+      params: filter.params ? { ...filter.params } : undefined
+    };
 
     const w = src.width, h = src.height;
     const tempCanvas = document.createElement('canvas');
@@ -340,17 +350,24 @@ export class CanvasEngine {
 
     this.filteredImageData = dst;
     tctx.putImageData(dst, 0, 0);
-    this._filteredImage = new Image();
-    this._filteredImage.onload = () => this.render();
-    this._filteredImage.src = tempCanvas.toDataURL();
+    this._filteredCanvas = tempCanvas;
+    this._filteredImage = null;
+    this.render();
   }
 
   _clearFilter() {
     this._activeFilter = null;
+    this._lastFilterPayload = null;
     this._filteredImage = null;
+    this._filteredCanvas = null;
     this.filteredImageData = null;
     this._cssFilter = 'none';
     this.render();
+  }
+
+  _reapplyActiveFilter() {
+    if (!this._lastFilterPayload || !this.image) return;
+    this._applyFilter(this._lastFilterPayload);
   }
 
   // === Adjustments ===
@@ -362,7 +379,8 @@ export class CanvasEngine {
     const hue = params.hue; // -180 to 180 deg
     
     this._cssFilter = `brightness(${bri}%) contrast(${con}%) saturate(${sat}%) hue-rotate(${hue}deg)`;
-    this.render();
+    if (this._lastFilterPayload) this._reapplyActiveFilter();
+    else this.render();
   }
 
   _commitAdjust(params) {
@@ -418,12 +436,12 @@ export class CanvasEngine {
     // Build combined CSS filter from adjustment layers + manual cssFilter
     let combinedFilter = this._buildCombinedFilter();
     
-    const hasManualFilterActive = this._activeFilter && this._filteredImage;
+    const hasManualFilterActive = this._activeFilter && (this._filteredCanvas || this._filteredImage || this.filteredImageData);
     // Don't apply SVG combined Filter if we are drawing the pre-baked manual filter image,
     // otherwise the adjustments multiply onto the heatmap itself!
     this.ctx.filter = hasManualFilterActive ? 'none' : combinedFilter;
 
-    const drawImg = hasManualFilterActive ? this._filteredImage : this.image;
+    const drawImg = hasManualFilterActive ? (this._filteredCanvas || this._filteredImage) : this.image;
     this.ctx.drawImage(drawImg, this.offsetX, this.offsetY, this.image.width * this.scale, this.image.height * this.scale);
     this.ctx.restore();
 
@@ -460,7 +478,9 @@ export class CanvasEngine {
     ctx.filter = this._buildCombinedFilter();
     const useFiltered = includeActiveFilter && this._activeFilter;
 
-    if (useFiltered && this.filteredImageData) {
+    if (useFiltered && this._filteredCanvas) {
+      ctx.drawImage(this._filteredCanvas, 0, 0);
+    } else if (useFiltered && this.filteredImageData) {
       // Use synchronous pixel buffer first so color picking and legends always
       // match the latest displayed filter state without waiting for Image.onload.
       const srcCanvas = document.createElement('canvas');
