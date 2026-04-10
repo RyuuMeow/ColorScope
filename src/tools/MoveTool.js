@@ -32,6 +32,7 @@ export class MoveTool {
 
     container.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
+      if (bus._currentTool === 'brush' || bus._currentTool === 'eraser') return;
       // Prevent canvas interactions if clicking on inline UI overlays
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON' || e.target.closest('.inline-pin-label-input') || e.target.closest('div[style*="var(--bg-surface)"]')) return;
       

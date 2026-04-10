@@ -40,6 +40,7 @@ export class CanvasEngine {
     this._lastFilterPayload = null;
     this._filteredImage = null;
     this._filteredCanvas = null;
+    this._paintCompositeCanvas = document.createElement('canvas');
     this._cssFilter = 'none';
 
     this._resizeObserver = new ResizeObserver(() => this._resize());
@@ -54,6 +55,7 @@ export class CanvasEngine {
     bus.on('filter:clear', () => this._clearFilter());
     bus.on('layers:changed', () => this._reapplyActiveFilter());
     bus.on('layers:properties-changed', () => this._reapplyActiveFilter());
+    bus.on('layers:preview-changed', () => this._reapplyActiveFilter());
     bus.on('image:adjust:preview', (params) => this._previewAdjust(params));
     bus.on('image:adjust:commit', (params) => this._commitAdjust(params));
   }
@@ -302,7 +304,10 @@ export class CanvasEngine {
 
     // Always compute from the unfiltered composite image to avoid cumulative
     // grayscale degradation when the slider is dragged repeatedly.
-    const src = this.getCompositeImageData({ includeActiveFilter: false }) || this.imageData;
+    const src = this.getCompositeImageData({
+      includeActiveFilter: false,
+      includePaintObjects: true
+    }) || this.imageData;
     if (!src) return;
     this._activeFilter = filter.type;
     this._lastFilterPayload = {
@@ -445,13 +450,12 @@ export class CanvasEngine {
     this.ctx.drawImage(drawImg, this.offsetX, this.offsetY, this.image.width * this.scale, this.image.height * this.scale);
     this.ctx.restore();
 
-    // Render all visible layer objects
-    if (this.layerManager) {
-      const objs = this.layerManager.getVisibleObjects();
-      for (const obj of objs) {
-        obj.render(this.octx, this.scale, this.offsetX, this.offsetY, { width: w, height: h });
-      }
-    }
+    this.renderObjectsToContext(this.octx, this.scale, this.offsetX, this.offsetY, {
+      width: w,
+      height: h,
+      includePaintObjects: !hasManualFilterActive,
+      includeOverlayObjects: true
+    });
 
     // Emit for tool previews (drawing in progress, selection rects, etc.)
     bus.emit('canvas:render', {
@@ -467,7 +471,7 @@ export class CanvasEngine {
    * Generates a full-resolution ImageData of the image WITH all adjustment CSS filters applied.
    */
   getCompositeImageData(options = {}) {
-    const { includeActiveFilter = true } = options;
+    const { includeActiveFilter = true, includePaintObjects = false } = options;
     if (!this.image) return null;
     const canvas = document.createElement('canvas');
     canvas.width = this.image.width;
@@ -493,7 +497,47 @@ export class CanvasEngine {
     } else {
       ctx.drawImage(this.image, 0, 0);
     }
+
+    if (includePaintObjects) {
+      this.renderObjectsToContext(ctx, 1, 0, 0, {
+        width: canvas.width,
+        height: canvas.height,
+        includePaintObjects: true,
+        includeOverlayObjects: false
+      });
+    }
     return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  renderObjectsToContext(targetCtx, scale, offsetX, offsetY, options = {}) {
+    if (!this.layerManager || !targetCtx) return;
+    const includePaintObjects = options.includePaintObjects !== false;
+    const includeOverlayObjects = options.includeOverlayObjects !== false;
+
+    const objs = this.layerManager.getVisibleObjects();
+    if (!objs.length) return;
+
+    const paintObjects = objs.filter((obj) => obj.type === 'brush');
+    const overlayObjects = objs.filter((obj) => obj.type !== 'brush');
+
+    if (includePaintObjects && paintObjects.length) {
+      const paintCanvas = this._paintCompositeCanvas;
+      if (paintCanvas.width !== targetCtx.canvas.width || paintCanvas.height !== targetCtx.canvas.height) {
+        paintCanvas.width = targetCtx.canvas.width;
+        paintCanvas.height = targetCtx.canvas.height;
+      }
+      const paintCtx = paintCanvas.getContext('2d');
+      paintCtx.clearRect(0, 0, paintCanvas.width, paintCanvas.height);
+      for (const obj of paintObjects) {
+        obj.render(paintCtx, scale, offsetX, offsetY, options);
+      }
+      targetCtx.drawImage(paintCanvas, 0, 0);
+    }
+
+    if (!includeOverlayObjects) return;
+    for (const obj of overlayObjects) {
+      obj.render(targetCtx, scale, offsetX, offsetY, options);
+    }
   }
 
   _buildCombinedFilter() {

@@ -33,6 +33,9 @@ export class CanvasObject {
       case 'pin':
         obj = new PinObject(data.x, data.y, data);
         break;
+      case 'brush':
+        obj = new BrushStrokeObject(data);
+        break;
       case 'note':
         obj = new NoteObject(data.x, data.y, data.color);
         Object.assign(obj, data);
@@ -586,5 +589,302 @@ export class ComparisonObject extends CanvasObject {
 
   serialize() {
     return { id: this.id, type: 'comparison', start: { ...this.start }, end: { ...this.end }, delta: this.delta, dBright: this.dBright };
+  }
+}
+
+// ====================================================================
+// BRUSH STROKE / ERASER
+// ====================================================================
+export class BrushStrokeObject extends CanvasObject {
+  constructor(data = {}) {
+    super('brush');
+    this.mode = data.mode === 'erase' ? 'erase' : 'paint';
+    this.color = data.color || '#ff6b6b';
+    this.size = Math.max(1, Number(data.size) || 18);
+    this.opacity = Math.max(0.01, Math.min(1, Number(data.opacity) || 0.9));
+    this.flow = Math.max(0.01, Math.min(1, Number(data.flow) || 0.85));
+    this.hardness = Math.max(0.05, Math.min(1, Number(data.hardness) || 0.75));
+    this.pressureSize = !!data.pressureSize;
+    this.pressureOpacity = !!data.pressureOpacity;
+    this.points = Array.isArray(data.points) ? data.points.map((point) => ({
+      x: Number(point.x) || 0,
+      y: Number(point.y) || 0,
+      size: Math.max(0.5, Number(point.size) || this.size),
+      alpha: Math.max(0.01, Math.min(1, Number(point.alpha) || 1))
+    })) : [];
+    this._cacheCanvas = null;
+    this._cacheCtx = null;
+    this._cacheBounds = null;
+    this._renderedPointCount = 0;
+    this._pendingStartIndex = this.points.length ? 0 : null;
+  }
+
+  addPoint(x, y, pressure = 1) {
+    const resolvedPressure = Math.max(0.05, Math.min(1, pressure || 1));
+    const sizeFactor = this.pressureSize ? (0.25 + resolvedPressure * 0.75) : 1;
+    const opacityFactor = this.pressureOpacity
+      ? Math.max(0.02, Math.min(1, resolvedPressure ** 1.8))
+      : 1;
+    const point = {
+      x,
+      y,
+      size: Math.max(0.5, this.size * sizeFactor),
+      alpha: Math.max(0.01, Math.min(1, opacityFactor))
+    };
+
+    if (this.points.length === 0) {
+      this.points.push(point);
+      this._pendingStartIndex = 0;
+      return;
+    }
+
+    const prev = this.points[this.points.length - 1];
+    const dx = point.x - prev.x;
+    const dy = point.y - prev.y;
+    const distance = Math.hypot(dx, dy);
+    const flowFactor = Math.max(0.08, this.flow);
+    const spacing = Math.max(0.85, Math.min(prev.size, point.size) * (0.55 - flowFactor * 0.45));
+    const steps = Math.max(1, Math.ceil(distance / spacing));
+    const startIndex = this.points.length;
+
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps;
+      this.points.push({
+        x: prev.x + dx * t,
+        y: prev.y + dy * t,
+        size: prev.size + (point.size - prev.size) * t,
+        alpha: prev.alpha + (point.alpha - prev.alpha) * t
+      });
+    }
+    this._pendingStartIndex = this._pendingStartIndex === null
+      ? startIndex
+      : Math.min(this._pendingStartIndex, startIndex);
+  }
+
+  hitTest(imgX, imgY, scale = 1) {
+    if (this.points.length === 0) return false;
+    const tolerance = Math.max(3, 6 / scale);
+    for (const point of this.points) {
+      const radius = point.size / 2 + tolerance;
+      if ((imgX - point.x) ** 2 + (imgY - point.y) ** 2 <= radius ** 2) return true;
+    }
+    return false;
+  }
+
+  getBounds() {
+    if (this.points.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const point of this.points) {
+      const radius = point.size / 2;
+      minX = Math.min(minX, point.x - radius);
+      minY = Math.min(minY, point.y - radius);
+      maxX = Math.max(maxX, point.x + radius);
+      maxY = Math.max(maxY, point.y + radius);
+    }
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+
+  move(dx, dy) {
+    this.points = this.points.map((point) => ({
+      ...point,
+      x: point.x + dx,
+      y: point.y + dy
+    }));
+    if (this._cacheBounds) {
+      this._cacheBounds = {
+        ...this._cacheBounds,
+        x: this._cacheBounds.x + dx,
+        y: this._cacheBounds.y + dy
+      };
+    }
+  }
+
+  render(ctx, scale, offsetX, offsetY) {
+    if (!this.points.length) return;
+    this._syncCache();
+    ctx.save();
+    ctx.globalCompositeOperation = this.mode === 'erase' ? 'destination-out' : 'source-over';
+    ctx.globalAlpha = this.opacity;
+    if (this._cacheCanvas && this._cacheBounds) {
+      ctx.drawImage(
+        this._cacheCanvas,
+        this._cacheBounds.x * scale + offsetX,
+        this._cacheBounds.y * scale + offsetY,
+        this._cacheCanvas.width * scale,
+        this._cacheCanvas.height * scale
+      );
+    }
+    ctx.restore();
+
+    const activeTool = window.app?.toolManager?.activeTool;
+    if (this.selected && activeTool !== 'brush' && activeTool !== 'eraser') {
+      const bounds = this.getBounds();
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = this.mode === 'erase' ? '#f59e0b' : '#6366f1';
+      ctx.strokeRect(
+        bounds.x * scale + offsetX,
+        bounds.y * scale + offsetY,
+        bounds.w * scale,
+        bounds.h * scale
+      );
+      ctx.restore();
+    }
+  }
+
+  _hexToRgba(hex, alpha) {
+    const safeHex = (hex || '#000000').replace('#', '');
+    const normalized = safeHex.length === 3
+      ? safeHex.split('').map((char) => char + char).join('')
+      : safeHex.padEnd(6, '0');
+    const r = parseInt(normalized.slice(0, 2), 16) || 0;
+    const g = parseInt(normalized.slice(2, 4), 16) || 0;
+    const b = parseInt(normalized.slice(4, 6), 16) || 0;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  _syncCache() {
+    if (!this.points.length) return;
+
+    const requiredBounds = this._computeCacheBounds();
+    if (!this._cacheCanvas || !this._cacheBounds) {
+      this._createCache(requiredBounds);
+      this._pendingStartIndex = 0;
+    } else if (this._needsCacheResize(requiredBounds)) {
+      this._resizeCache(requiredBounds);
+    }
+
+    const startIndex = this._pendingStartIndex === null ? this._renderedPointCount : this._pendingStartIndex;
+    if (startIndex < this.points.length) {
+      this._renderPointsToCache(startIndex);
+      this._renderedPointCount = this.points.length;
+      this._pendingStartIndex = null;
+    }
+  }
+
+  _computeCacheBounds() {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxRadius = 0;
+    for (const point of this.points) {
+      const radius = point.size / 2;
+      maxRadius = Math.max(maxRadius, radius);
+      minX = Math.min(minX, point.x - radius);
+      minY = Math.min(minY, point.y - radius);
+      maxX = Math.max(maxX, point.x + radius);
+      maxY = Math.max(maxY, point.y + radius);
+    }
+    const padding = Math.ceil(maxRadius + 3);
+    return {
+      x: Math.floor(minX - padding),
+      y: Math.floor(minY - padding),
+      w: Math.max(1, Math.ceil(maxX - minX + padding * 2)),
+      h: Math.max(1, Math.ceil(maxY - minY + padding * 2))
+    };
+  }
+
+  _needsCacheResize(requiredBounds) {
+    if (!this._cacheBounds) return true;
+    const current = this._cacheBounds;
+    return requiredBounds.x !== current.x
+      || requiredBounds.y !== current.y
+      || requiredBounds.w !== current.w
+      || requiredBounds.h !== current.h;
+  }
+
+  _createCache(bounds) {
+    this._cacheCanvas = document.createElement('canvas');
+    this._cacheCanvas.width = bounds.w;
+    this._cacheCanvas.height = bounds.h;
+    this._cacheCtx = this._cacheCanvas.getContext('2d');
+    this._cacheBounds = bounds;
+    this._renderedPointCount = 0;
+  }
+
+  _resizeCache(bounds) {
+    const prevCanvas = this._cacheCanvas;
+    const prevBounds = this._cacheBounds;
+    const prevRenderedCount = this._renderedPointCount;
+    this._createCache(bounds);
+    if (prevCanvas && prevBounds && this._cacheCtx) {
+      this._cacheCtx.drawImage(prevCanvas, prevBounds.x - bounds.x, prevBounds.y - bounds.y);
+    }
+    this._renderedPointCount = prevRenderedCount;
+    this._pendingStartIndex = this._pendingStartIndex === null ? prevRenderedCount : Math.min(this._pendingStartIndex, prevRenderedCount);
+  }
+
+  _renderPointsToCache(startIndex) {
+    if (!this._cacheCtx || !this._cacheBounds) return;
+    const hardEdge = Math.max(0, Math.min(1, this.hardness));
+    const flowAlpha = Math.max(0.02, Math.min(1, this.flow));
+    for (let i = startIndex; i < this.points.length; i++) {
+      const point = this.points[i];
+      const radius = Math.max(0.5, point.size / 2);
+      const sx = point.x - this._cacheBounds.x;
+      const sy = point.y - this._cacheBounds.y;
+      const alpha = Math.max(0.01, Math.min(1, point.alpha * flowAlpha));
+      const solidColor = this.mode === 'erase' ? `rgba(0,0,0,${alpha})` : this._hexToRgba(this.color, alpha);
+
+      if (i > 0) {
+        const prev = this.points[i - 1];
+        const prevSx = prev.x - this._cacheBounds.x;
+        const prevSy = prev.y - this._cacheBounds.y;
+        const avgSize = Math.max(0.5, (prev.size + point.size) / 2);
+        const avgAlpha = Math.max(0.01, Math.min(1, Math.min(prev.alpha, point.alpha) * flowAlpha));
+        const segmentColor = this.mode === 'erase' ? `rgba(0,0,0,${avgAlpha})` : this._hexToRgba(this.color, avgAlpha);
+        this._cacheCtx.save();
+        this._cacheCtx.lineCap = 'round';
+        this._cacheCtx.lineJoin = 'round';
+        this._cacheCtx.strokeStyle = segmentColor;
+        this._cacheCtx.lineWidth = Math.max(1, avgSize * (0.58 + hardEdge * 0.42));
+        if (hardEdge < 0.999) {
+          this._cacheCtx.shadowBlur = avgSize * (1 - hardEdge) * 0.45;
+          this._cacheCtx.shadowColor = segmentColor;
+        }
+        this._cacheCtx.beginPath();
+        this._cacheCtx.moveTo(prevSx, prevSy);
+        this._cacheCtx.lineTo(sx, sy);
+        this._cacheCtx.stroke();
+        this._cacheCtx.restore();
+      }
+
+      if (i === 0 || this.points.length === 1) {
+        if (hardEdge >= 0.999) {
+          this._cacheCtx.fillStyle = solidColor;
+        } else {
+          const gradient = this._cacheCtx.createRadialGradient(sx, sy, radius * hardEdge, sx, sy, radius);
+          const edgeColor = this.mode === 'erase' ? 'rgba(0,0,0,0)' : this._hexToRgba(this.color, 0);
+          gradient.addColorStop(0, solidColor);
+          gradient.addColorStop(Math.max(0.02, hardEdge), solidColor);
+          gradient.addColorStop(1, edgeColor);
+          this._cacheCtx.fillStyle = gradient;
+        }
+        this._cacheCtx.beginPath();
+        this._cacheCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        this._cacheCtx.fill();
+      }
+    }
+  }
+
+  serialize() {
+    return {
+      id: this.id,
+      type: 'brush',
+      mode: this.mode,
+      color: this.color,
+      size: this.size,
+      opacity: this.opacity,
+      flow: this.flow,
+      hardness: this.hardness,
+      pressureSize: this.pressureSize,
+      pressureOpacity: this.pressureOpacity,
+      points: this.points.map((point) => ({ ...point }))
+    };
   }
 }

@@ -8,6 +8,7 @@ export class HandTool {
   constructor(canvasEngine) {
     this.engine = canvasEngine;
     this._isPanning = false;
+    this._pointerId = null;
     this._startX = 0;
     this._startY = 0;
     this._origOffX = 0;
@@ -18,29 +19,40 @@ export class HandTool {
   _setup() {
     const container = $('#canvas-container');
 
-    container.addEventListener('mousedown', (e) => {
+    container.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || bus._currentTool !== 'hand') return;
       this._isPanning = true;
+      this._pointerId = e.pointerId;
       this._startX = e.clientX;
       this._startY = e.clientY;
       this._origOffX = this.engine.offsetX;
       this._origOffY = this.engine.offsetY;
       container.style.cursor = 'grabbing';
-      e.preventDefault();
+      if (e.cancelable) e.preventDefault();
+      try {
+        (e.target instanceof Element ? e.target : container).setPointerCapture?.(e.pointerId);
+      } catch {}
     });
 
-    window.addEventListener('mousemove', (e) => {
+    window.addEventListener('pointermove', (e) => {
       if (!this._isPanning) return;
+      if (this._pointerId !== null && e.pointerId !== this._pointerId) return;
       this.engine.offsetX = this._origOffX + (e.clientX - this._startX);
       this.engine.offsetY = this._origOffY + (e.clientY - this._startY);
       this.engine.render();
       bus.emit('canvas:transformed');
     });
 
-    window.addEventListener('mouseup', (e) => {
-      if (e.button !== 0 || !this._isPanning) return;
+    const stopPan = (e = {}) => {
+      if (!this._isPanning) return;
+      if (this._pointerId !== null && e.pointerId !== undefined && e.pointerId !== this._pointerId) return;
       this._isPanning = false;
+      this._pointerId = null;
       container.style.cursor = '';
-    });
+    };
+
+    window.addEventListener('pointerup', stopPan);
+    window.addEventListener('pointercancel', stopPan);
+    window.addEventListener('blur', () => stopPan({ pointerId: this._pointerId }));
   }
 }

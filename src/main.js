@@ -3,7 +3,7 @@
  */
 import { bus } from './utils/EventBus.js';
 import { $, $$, showModal, hideModal, createElement } from './utils/DOMUtils.js';
-import { rgbToHsl, rgbToHex, rgbToHsv, perceivedBrightness, colorName, saturationHeatColor } from './core/ColorMath.js';
+import { rgbToHsl, rgbToHex, rgbToHsv, perceivedBrightness, colorName, saturationHeatColor, hslToHex } from './core/ColorMath.js';
 import { ImageLoader } from './core/ImageLoader.js';
 import { CanvasEngine } from './core/CanvasEngine.js';
 import { LayerManager } from './core/LayerManager.js';
@@ -15,6 +15,7 @@ import { ColorPinTool } from './tools/ColorPinTool.js';
 import { ComparisonTool } from './tools/ComparisonTool.js';
 import { RegionTool } from './tools/RegionTool.js';
 import { NoteTool } from './tools/NoteTool.js';
+import { BrushTool } from './tools/BrushTool.js';
 import { FilterTool } from './tools/FilterTool.js';
 import { HarmonyTool } from './tools/HarmonyTool.js';
 import { PaletteExtractor } from './analysis/PaletteExtractor.js';
@@ -40,6 +41,7 @@ class ColorScopeApp {
     this.comparisonTool = new ComparisonTool(this.imageLoader, this.canvasEngine, this.layerManager);
     this.regionTool = new RegionTool(this.imageLoader, this.canvasEngine, this.layerManager);
     this.noteTool = new NoteTool(this.canvasEngine, this.layerManager);
+    this.brushTool = new BrushTool(this.canvasEngine, this.layerManager, (tool) => this._getBrushSettings(tool));
     this.filterTool = new FilterTool();
     this.harmonyTool = new HarmonyTool(this.imageLoader, this.canvasEngine);
     this.palettePage = new PalettePage(this);
@@ -49,6 +51,11 @@ class ColorScopeApp {
     this._currentHistoryId = null;
     this._propertyPanelState = { type: 'empty' };
     this._filterSettings = this._createDefaultFilterSettings();
+    this._brushSettings = this._createDefaultBrushSettings();
+    this._undoStack = [];
+    this._redoStack = [];
+    this._historyCheckpointTimer = null;
+    this._isApplyingHistoryState = false;
 
     this._initTheme();
     this._initEvents();
@@ -58,6 +65,7 @@ class ColorScopeApp {
     this._initContextMenu();
     this._initLayerPanel();
     this._renderHomeGallery();
+    this._updateHistoryButtons();
   }
 
   // ===== Theme =====
@@ -90,6 +98,200 @@ class ColorScopeApp {
       analogous: { baseHue: 0, tol: 30 },
       complementary: { baseHue: 0, tol: 30 }
     };
+  }
+
+  _createDefaultBrushSettings() {
+    return {
+      brush: {
+        h: 12,
+        s: 90,
+        l: 58,
+        size: 24,
+        opacity: 92,
+        flow: 82,
+        hardness: 76,
+        pressureSize: true,
+        pressureOpacity: false
+      },
+      eraser: {
+        size: 30,
+        opacity: 100,
+        flow: 100,
+        hardness: 92,
+        pressureSize: true,
+        pressureOpacity: false
+      }
+    };
+  }
+
+  _sanitizeBrushSettings(raw) {
+    const defaults = this._createDefaultBrushSettings();
+    if (!raw || typeof raw !== 'object') return defaults;
+
+    const toNumber = (value, fallback) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+
+    return {
+      brush: {
+        h: Math.max(0, Math.min(360, Math.round(toNumber(raw.brush?.h, defaults.brush.h)))),
+        s: Math.max(0, Math.min(100, Math.round(toNumber(raw.brush?.s, defaults.brush.s)))),
+        l: Math.max(0, Math.min(100, Math.round(toNumber(raw.brush?.l, defaults.brush.l)))),
+        size: Math.max(1, Math.min(240, toNumber(raw.brush?.size, defaults.brush.size))),
+        opacity: Math.max(1, Math.min(100, Math.round(toNumber(raw.brush?.opacity, defaults.brush.opacity)))),
+        flow: Math.max(1, Math.min(100, Math.round(toNumber(raw.brush?.flow, defaults.brush.flow)))),
+        hardness: Math.max(1, Math.min(100, Math.round(toNumber(raw.brush?.hardness, defaults.brush.hardness)))),
+        pressureSize: raw.brush?.pressureSize ?? defaults.brush.pressureSize,
+        pressureOpacity: raw.brush?.pressureOpacity ?? defaults.brush.pressureOpacity
+      },
+      eraser: {
+        size: Math.max(1, Math.min(240, toNumber(raw.eraser?.size, defaults.eraser.size))),
+        opacity: Math.max(1, Math.min(100, Math.round(toNumber(raw.eraser?.opacity, defaults.eraser.opacity)))),
+        flow: Math.max(1, Math.min(100, Math.round(toNumber(raw.eraser?.flow, defaults.eraser.flow)))),
+        hardness: Math.max(1, Math.min(100, Math.round(toNumber(raw.eraser?.hardness, defaults.eraser.hardness)))),
+        pressureSize: raw.eraser?.pressureSize ?? defaults.eraser.pressureSize,
+        pressureOpacity: raw.eraser?.pressureOpacity ?? defaults.eraser.pressureOpacity
+      }
+    };
+  }
+
+  _getBrushSettings(tool = 'brush') {
+    const settings = this._brushSettings?.[tool] || this._brushSettings?.brush || this._createDefaultBrushSettings().brush;
+    if (tool === 'eraser') {
+      return {
+        ...settings,
+        color: '#000000'
+      };
+    }
+    return {
+      ...settings,
+      color: hslToHex(settings.h, settings.s, settings.l)
+    };
+  }
+
+  _cloneHistorySnapshot(snapshot) {
+    return JSON.parse(JSON.stringify(snapshot));
+  }
+
+  _createHistorySnapshot() {
+    return this._cloneHistorySnapshot(this._captureCanvasState());
+  }
+
+  _snapshotKey(snapshot) {
+    return JSON.stringify(snapshot);
+  }
+
+  _resetUndoHistory() {
+    const snapshot = this._createHistorySnapshot();
+    this._undoStack = [snapshot];
+    this._redoStack = [];
+    this._updateHistoryButtons();
+  }
+
+  _queueHistoryCheckpoint(immediate = false) {
+    if (this._isApplyingHistoryState) return;
+    if (immediate) {
+      if (this._historyCheckpointTimer) {
+        clearTimeout(this._historyCheckpointTimer);
+        this._historyCheckpointTimer = null;
+      }
+      this._commitHistoryCheckpoint();
+      return;
+    }
+
+    if (this._historyCheckpointTimer) clearTimeout(this._historyCheckpointTimer);
+    this._historyCheckpointTimer = setTimeout(() => {
+      this._historyCheckpointTimer = null;
+      this._commitHistoryCheckpoint();
+    }, 180);
+  }
+
+  _commitHistoryCheckpoint() {
+    if (this._isApplyingHistoryState) return;
+    const snapshot = this._createHistorySnapshot();
+    const key = this._snapshotKey(snapshot);
+    const last = this._undoStack[this._undoStack.length - 1];
+    if (last && this._snapshotKey(last) === key) {
+      this._updateHistoryButtons();
+      return;
+    }
+
+    this._undoStack.push(snapshot);
+    if (this._undoStack.length > 60) this._undoStack.shift();
+    this._redoStack = [];
+    this._updateHistoryButtons();
+  }
+
+  _updateHistoryButtons() {
+    const undoBtn = $('#btn-undo');
+    const redoBtn = $('#btn-redo');
+    if (undoBtn) undoBtn.disabled = this._undoStack.length <= 1;
+    if (redoBtn) redoBtn.disabled = this._redoStack.length === 0;
+  }
+
+  _applyFilterState(filterName) {
+    const current = this._getActiveFilterName();
+    if (!filterName) {
+      if (current) this.toolManager.toggleFilter(current);
+      return;
+    }
+    if (current && current !== filterName) {
+      this.toolManager.toggleFilter(current);
+    }
+    if (this._getActiveFilterName() !== filterName) {
+      this.toolManager.toggleFilter(filterName);
+    } else if (filterName === 'hue' || filterName === 'analogous' || filterName === 'complementary') {
+      bus.emit('filter:show-props', { filterName });
+    }
+  }
+
+  _restoreHistorySnapshot(snapshot) {
+    if (!snapshot) return;
+    this._isApplyingHistoryState = true;
+    if (this._historyCheckpointTimer) {
+      clearTimeout(this._historyCheckpointTimer);
+      this._historyCheckpointTimer = null;
+    }
+
+    this._restoreCanvasState(snapshot, { deferFilter: false });
+    this.canvasEngine.render();
+    this._saveCurrentState();
+    this._updateObjectLists();
+    this._renderLayerPanel();
+    this._queueAnalysisUpdate();
+    this._isApplyingHistoryState = false;
+    this._updateHistoryButtons();
+  }
+
+  _undo() {
+    if (this._undoStack.length <= 1) return;
+    const current = this._createHistorySnapshot();
+    const currentKey = this._snapshotKey(current);
+    const topKey = this._snapshotKey(this._undoStack[this._undoStack.length - 1]);
+
+    if (currentKey === topKey) {
+      const snapshot = this._undoStack.pop();
+      this._redoStack.push(snapshot);
+    } else {
+      this._redoStack.push(current);
+    }
+
+    const previous = this._undoStack[this._undoStack.length - 1];
+    this._restoreHistorySnapshot(this._cloneHistorySnapshot(previous));
+  }
+
+  _redo() {
+    if (this._redoStack.length === 0) return;
+    const snapshot = this._redoStack.pop();
+    const current = this._createHistorySnapshot();
+    const currentKey = this._snapshotKey(current);
+    const top = this._undoStack[this._undoStack.length - 1];
+    if (!top || this._snapshotKey(top) !== currentKey) {
+      this._undoStack.push(current);
+    }
+    this._undoStack.push(this._cloneHistorySnapshot(snapshot));
+    this._restoreHistorySnapshot(this._cloneHistorySnapshot(snapshot));
   }
 
   _sanitizeFilterSettings(raw) {
@@ -141,25 +343,28 @@ class ColorScopeApp {
     return {
       layerState: this.layerManager.serialize(),
       filterSettings: this._sanitizeFilterSettings(this._filterSettings),
+      brushSettings: this._sanitizeBrushSettings(this._brushSettings),
       activeFilter: this._getActiveFilterName()
     };
   }
 
-  _restoreCanvasState(savedState) {
+  _restoreCanvasState(savedState, options = {}) {
+    const { deferFilter = true } = options;
     const layerState = savedState?.layerState || savedState;
     if (layerState?.layers) {
       this.layerManager.deserialize(layerState);
     }
 
     this._filterSettings = this._sanitizeFilterSettings(savedState?.filterSettings);
+    this._brushSettings = this._sanitizeBrushSettings(savedState?.brushSettings);
 
     const savedFilter = savedState?.activeFilter;
-    if (savedFilter) {
+    if (deferFilter) {
       requestAnimationFrame(() => {
-        if (!this.toolManager.activeFilters.has(savedFilter)) {
-          this.toolManager.toggleFilter(savedFilter);
-        }
+        this._applyFilterState(savedFilter || null);
       });
+    } else {
+      this._applyFilterState(savedFilter || null);
     }
   }
 
@@ -188,9 +393,11 @@ class ColorScopeApp {
       this._currentHistoryId = null;
       this.layerManager.clearAll();
       this._filterSettings = this._createDefaultFilterSettings();
+      this._brushSettings = this._createDefaultBrushSettings();
       if (data.state) {
         this._restoreCanvasState(data.state);
       }
+      this._resetUndoHistory();
 
       setTimeout(() => this._runAnalysis(data.imageData), 100);
       this._saveToHistory(data);
@@ -210,15 +417,26 @@ class ColorScopeApp {
     bus.on('filter:apply', (filter) => {
       this._updateFilterLegend(filter.type);
       this._saveCurrentState();
+      this._queueHistoryCheckpoint();
     });
     bus.on('filter:clear', () => {
       this._updateFilterLegend(null);
       this._saveCurrentState();
+      this._queueHistoryCheckpoint();
     });
     
     // Filter property panel
     bus.on('filter:show-props', ({ filterName }) => this._renderFilterProps(filterName));
     bus.on('filter:props-clear', () => this._clearPropertyPanel());
+    bus.on('tool:changed', ({ tool }) => {
+      if (tool === 'brush' || tool === 'eraser') {
+        this._renderBrushProps(tool);
+        return;
+      }
+      if (this._propertyPanelState.type === 'brush') {
+        this._syncPropertyPanelWithActiveLayer();
+      }
+    });
 
     bus.on('canvas:status', (status) => {
       $('#status-zoom').textContent = status.zoom + '%';
@@ -233,18 +451,21 @@ class ColorScopeApp {
       this.canvasEngine.render();
       this._saveCurrentState();
       this._queueAnalysisUpdate();
+      this._queueHistoryCheckpoint(true);
     });
 
     bus.on('layers:properties-changed', () => {
       this.canvasEngine.render();
       this._saveCurrentState();
       this._queueAnalysisUpdate();
+      this._queueHistoryCheckpoint();
     });
 
     bus.on('layers:objects-changed', () => {
       this._updateObjectLists();
       this.canvasEngine.render();
       this._saveCurrentState();
+      this._queueHistoryCheckpoint(true);
     });
 
     $('#btn-back')?.addEventListener('click', () => this._goHome());
@@ -265,9 +486,26 @@ class ColorScopeApp {
     $('#btn-settings')?.addEventListener('click', () => {
       settingsModal.show();
     });
+    $('#btn-undo')?.addEventListener('click', () => this._undo());
+    $('#btn-redo')?.addEventListener('click', () => this._redo());
     
     bus.on('settings:changed', () => {
       this.canvasEngine.render();
+    });
+
+    window.addEventListener('keydown', (e) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const isMod = e.ctrlKey || e.metaKey;
+      if (!isMod) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        this._undo();
+      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        this._redo();
+      }
     });
   }
 
@@ -751,6 +989,260 @@ class ColorScopeApp {
     }
   }
 
+  _renderBrushProps(toolName = 'brush') {
+    const isEraser = toolName === 'eraser';
+    const settings = this._brushSettings[toolName];
+    if (!settings) return;
+
+    let html = `<h3 class="section-title">${isEraser ? '橡皮擦 Eraser' : '畫筆 Brush'}</h3>`;
+
+    if (!isEraser) {
+      const brushHex = hslToHex(settings.h, settings.s, settings.l).toUpperCase();
+      html += `
+        <div class="brush-color-card">
+          <div class="brush-picker-topbar">
+            <div class="brush-color-preview-wrap">
+              <div class="brush-color-preview" id="brush-color-preview" style="background:${brushHex};"></div>
+              <div class="brush-color-meta">
+                <strong id="brush-color-hex">${brushHex}</strong>
+                <span id="brush-color-hsl">H ${settings.h}° / S ${settings.s}% / L ${settings.l}%</span>
+              </div>
+            </div>
+            <button class="brush-eyedropper-btn" id="brush-eyedropper-btn" type="button">取色器 Eyedropper</button>
+          </div>
+          <canvas id="brush-hls-canvas" class="brush-hls-canvas" width="260" height="260"></canvas>
+        </div>
+      `;
+    }
+
+    html += `
+      ${this._makeSlider('brush-size', '大小 Size', 'size', settings.size, 1, 240)}
+      ${this._makeSlider('brush-opacity', '不透明度 Opacity', 'opacity', settings.opacity, 1, 100)}
+      ${this._makeSlider('brush-flow', '流量 Flow', 'flow', settings.flow, 1, 100)}
+      ${this._makeSlider('brush-hardness', '軟硬 Hardness', 'hardness', settings.hardness, 1, 100)}
+      <div class="brush-toggle-grid">
+        <label class="brush-toggle">
+          <input type="checkbox" id="brush-pressure-size" ${settings.pressureSize ? 'checked' : ''}>
+          <span>壓感控制大小 Pressure Size</span>
+        </label>
+        <label class="brush-toggle">
+          <input type="checkbox" id="brush-pressure-opacity" ${settings.pressureOpacity ? 'checked' : ''}>
+          <span>壓感控制不透明度 Pressure Opacity</span>
+        </label>
+      </div>
+    `;
+
+    this._showPropertyPanel(html, true, { type: 'brush', toolName });
+
+    const container = $('#properties-content');
+    if (!container) return;
+
+    const sliderIds = ['size', 'opacity', 'flow', 'hardness'];
+    sliderIds.forEach((key) => {
+      const slider = $(`#brush-${key}`, container);
+      if (!slider) return;
+      const syncValue = () => {
+        const valueEl = slider.parentElement?.querySelector('.adj-val');
+        if (valueEl) {
+          valueEl.textContent = key === 'size' ? String(Math.round(settings[key])) : `${settings[key]}%`;
+        }
+      };
+      slider.addEventListener('input', () => {
+        settings[key] = key === 'size' ? Number(slider.value) : parseInt(slider.value, 10);
+        syncValue();
+        this._saveCurrentState();
+        this._queueHistoryCheckpoint();
+      });
+      syncValue();
+    });
+
+    $('#brush-pressure-size', container)?.addEventListener('change', (e) => {
+      settings.pressureSize = e.target.checked;
+      this._saveCurrentState();
+      this._queueHistoryCheckpoint(true);
+    });
+    $('#brush-pressure-opacity', container)?.addEventListener('change', (e) => {
+      settings.pressureOpacity = e.target.checked;
+      this._saveCurrentState();
+      this._queueHistoryCheckpoint(true);
+    });
+
+    if (isEraser) return;
+
+    const colorCanvas = $('#brush-hls-canvas', container);
+    const eyedropperBtn = $('#brush-eyedropper-btn', container);
+    const hexEl = $('#brush-color-hex', container);
+    const hslEl = $('#brush-color-hsl', container);
+    const previewEl = $('#brush-color-preview', container);
+
+    const redrawColorPanel = () => {
+      if (!colorCanvas) return;
+      const ctx = colorCanvas.getContext('2d');
+      const width = colorCanvas.width;
+      const height = colorCanvas.height;
+      const cx = width / 2;
+      const cy = height / 2;
+      const outerR = Math.min(width, height) / 2 - 12;
+      const innerR = outerR - 24;
+      const squareSize = Math.round(innerR * Math.SQRT2 - 8);
+      const squareX = Math.round(cx - squareSize / 2);
+      const squareY = Math.round(cy - squareSize / 2);
+
+      ctx.clearRect(0, 0, width, height);
+
+      for (let i = 0; i < 360; i++) {
+        const start = ((i - 1) * Math.PI) / 180;
+        const end = ((i + 1) * Math.PI) / 180;
+        ctx.beginPath();
+        ctx.strokeStyle = `hsl(${i}, 100%, 50%)`;
+        ctx.lineWidth = outerR - innerR;
+        ctx.arc(cx, cy, (outerR + innerR) / 2, start, end);
+        ctx.stroke();
+      }
+
+      const square = ctx.createImageData(squareSize, squareSize);
+      for (let y = 0; y < squareSize; y++) {
+        const lightness = Math.round(100 - (y / (squareSize - 1)) * 100);
+        for (let x = 0; x < squareSize; x++) {
+          const saturation = Math.round((x / (squareSize - 1)) * 100);
+          const hex = hslToHex(settings.h, saturation, lightness);
+          const idx = (y * squareSize + x) * 4;
+          square.data[idx] = parseInt(hex.slice(1, 3), 16);
+          square.data[idx + 1] = parseInt(hex.slice(3, 5), 16);
+          square.data[idx + 2] = parseInt(hex.slice(5, 7), 16);
+          square.data[idx + 3] = 255;
+        }
+      }
+      ctx.putImageData(square, squareX, squareY);
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(squareX + 0.5, squareY + 0.5, squareSize - 1, squareSize - 1);
+      ctx.restore();
+
+      const hueRad = (settings.h - 90) * (Math.PI / 180);
+      const ringMarkerRadius = (outerR + innerR) / 2;
+      const hueX = cx + Math.cos(hueRad) * ringMarkerRadius;
+      const hueY = cy + Math.sin(hueRad) * ringMarkerRadius;
+      const squareMarkerX = squareX + (settings.s / 100) * squareSize;
+      const squareMarkerY = squareY + ((100 - settings.l) / 100) * squareSize;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(hueX, hueY, 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(squareMarkerX, squareMarkerY, 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(15,23,42,0.72)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(hueX, hueY, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(squareMarkerX, squareMarkerY, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    const syncColorMeta = () => {
+      const hex = hslToHex(settings.h, settings.s, settings.l).toUpperCase();
+      if (hexEl) hexEl.textContent = hex;
+      if (hslEl) hslEl.textContent = `H ${settings.h}° / S ${settings.s}% / L ${settings.l}%`;
+      if (previewEl) previewEl.style.background = hex;
+      redrawColorPanel();
+      this._saveCurrentState();
+      this._queueHistoryCheckpoint();
+    };
+
+    let draggingColor = false;
+    let dragZone = null;
+    const applyCanvasPoint = (event) => {
+      if (!colorCanvas) return;
+      const rect = colorCanvas.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+      const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+      const width = colorCanvas.width;
+      const height = colorCanvas.height;
+      const scaleX = width / rect.width;
+      const scaleY = height / rect.height;
+      const px = x * scaleX;
+      const py = y * scaleY;
+      const cx = width / 2;
+      const cy = height / 2;
+      const outerR = Math.min(width, height) / 2 - 12;
+      const innerR = outerR - 24;
+      const squareSize = Math.round(innerR * Math.SQRT2 - 8);
+      const squareX = Math.round(cx - squareSize / 2);
+      const squareY = Math.round(cy - squareSize / 2);
+      const dx = px - cx;
+      const dy = py - cy;
+      const distance = Math.hypot(dx, dy);
+
+      if (!dragZone) {
+        if (distance >= innerR && distance <= outerR) dragZone = 'ring';
+        else if (px >= squareX && px <= squareX + squareSize && py >= squareY && py <= squareY + squareSize) dragZone = 'square';
+        else return;
+      }
+
+      if (dragZone === 'ring') {
+        settings.h = (Math.round((Math.atan2(dy, dx) * 180) / Math.PI) + 450) % 360;
+      } else if (dragZone === 'square') {
+        settings.s = Math.round(((px - squareX) / squareSize) * 100);
+        settings.l = Math.round(100 - ((py - squareY) / squareSize) * 100);
+        settings.s = Math.max(0, Math.min(100, settings.s));
+        settings.l = Math.max(0, Math.min(100, settings.l));
+      }
+      syncColorMeta();
+    };
+
+    colorCanvas?.addEventListener('pointerdown', (event) => {
+      draggingColor = true;
+      dragZone = null;
+      colorCanvas.setPointerCapture?.(event.pointerId);
+      applyCanvasPoint(event);
+    });
+    colorCanvas?.addEventListener('pointermove', (event) => {
+      if (!draggingColor) return;
+      applyCanvasPoint(event);
+    });
+    const stopCanvasDrag = () => {
+      draggingColor = false;
+      dragZone = null;
+    };
+    colorCanvas?.addEventListener('pointerup', stopCanvasDrag);
+    colorCanvas?.addEventListener('pointercancel', stopCanvasDrag);
+    colorCanvas?.addEventListener('lostpointercapture', stopCanvasDrag);
+
+    eyedropperBtn?.addEventListener('click', async () => {
+      if (!window.EyeDropper) return;
+      try {
+        const eyeDropper = new window.EyeDropper();
+        const result = await eyeDropper.open();
+        const hex = result?.sRGBHex;
+        if (!hex) return;
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        const hsl = rgbToHsl(r, g, b);
+        settings.h = hsl.h;
+        settings.s = hsl.s;
+        settings.l = hsl.l;
+        syncColorMeta();
+      } catch {}
+    });
+
+    if (eyedropperBtn && !window.EyeDropper) {
+      eyedropperBtn.disabled = true;
+      eyedropperBtn.textContent = '取色器不支援';
+    }
+
+    syncColorMeta();
+  }
+
   _renderAdjustLayerProps(layer, autoSwitchToTab = false) {
     if (!layer || layer.type !== 'adjustment') {
       this._clearPropertyPanel();
@@ -1214,6 +1706,8 @@ class ColorScopeApp {
           items.push({ label: '刪除對比線', action: 'delete-obj', data: { objId: obj.id }, danger: true });
         } else if (obj.type === 'region') {
           items.push({ label: '刪除區域', action: 'delete-obj', data: { objId: obj.id }, danger: true });
+        } else if (obj.type === 'brush') {
+          items.push({ label: obj.mode === 'erase' ? '刪除橡皮擦筆畫' : '刪除筆刷筆畫', action: 'delete-obj', data: { objId: obj.id }, danger: true });
         }
       } else {
         const pixel = this.imageLoader.getPixel(imgX, imgY);
@@ -1405,13 +1899,18 @@ class ColorScopeApp {
   }
 
   _syncPropertyPanelWithActiveLayer() {
+    if (this.toolManager?.activeTool === 'brush' || this.toolManager?.activeTool === 'eraser') {
+      this._renderBrushProps(this.toolManager.activeTool);
+      return;
+    }
+
     const active = this.layerManager.getActiveLayer();
     if (active && active.type === 'adjustment') {
       this._renderAdjustLayerProps(active, false);
       return;
     }
 
-    if (this._propertyPanelState.type === 'adjustment') {
+    if (this._propertyPanelState.type === 'adjustment' || this._propertyPanelState.type === 'brush') {
       this._clearPropertyPanel();
     }
   }
@@ -1520,11 +2019,8 @@ class ColorScopeApp {
 
     // === Step 2: Render canvas objects (pins, notes, comparisons, regions) ===
     if (includeCanvas) {
-      const objs = this.layerManager.getVisibleObjects();
       const exportScale = this.canvasEngine.scale ? 1 / this.canvasEngine.scale : 1.0;
-      for (const obj of objs) {
-        obj.render(baseCtx, 1, 0, 0, { width: img.width, height: img.height, exportScale });
-      }
+      this.canvasEngine.renderObjectsToContext(baseCtx, 1, 0, 0, { width: img.width, height: img.height, exportScale });
     }
 
     // === Step 3: Calculate extra panels below the image ===

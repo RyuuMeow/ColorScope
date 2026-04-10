@@ -142,8 +142,25 @@ export class LayerManager {
 
   // ===== Object Management (always on active layer) =====
 
-  addObject(obj) {
+  _createAutoObjectLayerName(obj) {
+    const typeMap = {
+      brush: '筆刷圖層',
+      pin: '圖釘圖層',
+      note: '筆記圖層',
+      region: '區域圖層',
+      comparison: '對比圖層'
+    };
+    return typeMap[obj?.type] || `圖層 ${this.layers.length + 1}`;
+  }
+
+  _ensureActiveObjectLayer(obj) {
     const layer = this.getActiveLayer();
+    if (layer && layer.visible && layer.type === 'normal') return layer;
+    return this.addLayer(this._createAutoObjectLayerName(obj));
+  }
+
+  addObject(obj) {
+    const layer = this._ensureActiveObjectLayer(obj);
     if (layer) {
       layer.objects.push(obj);
       bus.emit('layers:objects-changed');

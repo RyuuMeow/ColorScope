@@ -147,6 +147,12 @@
         </div>
       </div>
       <div class="header-right">
+        <button class="header-btn icon-btn" id="btn-undo" title="復原 Undo (Ctrl/Cmd+Z)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h9a7 7 0 1 1 0 14h-1"/></svg>
+        </button>
+        <button class="header-btn icon-btn" id="btn-redo" title="重做 Redo (Ctrl/Cmd+Y)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9h-9a7 7 0 1 0 0 14h1"/></svg>
+        </button>
         <button class="header-btn" id="btn-analysis" title="色彩深度分析">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
           <span>深度分析</span>
@@ -191,6 +197,20 @@
           <button class="tool-btn" data-tool="hand" title="手掌 (Z)">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 11V6a2 2 0 0 0-4 0v1"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.2 0-3.2-.4-4.8-2L3.3 16a2 2 0 0 1 3-2.7l1.7 1.5"/></svg>
             <span class="tool-label">手掌</span>
+          </button>
+          <button class="tool-btn" data-tool="brush" title="畫筆 Brush (B)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 4c2.8 2.8 2.8 7.2 0 10l-5.5 5.5a3 3 0 0 1-4.2 0 3 3 0 0 1 0-4.2L9.8 9.8"></path>
+              <path d="M11 3l10 10"></path>
+            </svg>
+            <span class="tool-label">畫筆</span>
+          </button>
+          <button class="tool-btn" data-tool="eraser" title="橡皮擦 Eraser (E)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 20H9"></path>
+              <path d="M14.5 4.5l5 5-8.5 8.5H6l-2.5-2.5 8.5-11z"></path>
+            </svg>
+            <span class="tool-label">橡皮擦</span>
           </button>
         </div>
         <div class="toolbar-divider"></div>

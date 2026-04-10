@@ -10,6 +10,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  touch-action: none;
+  -ms-touch-action: none;
+  user-select: none;
 }
 
 .canvas-container canvas {
@@ -182,6 +185,8 @@
 .canvas-container.cursor-region { cursor: crosshair; }
 .canvas-container.cursor-note { cursor: cell; }
 .canvas-container.cursor-compare { cursor: crosshair; }
+.canvas-container.cursor-brush { cursor: crosshair; }
+.canvas-container.cursor-eraser { cursor: cell; }
 
 
 /* ===== Color Path Panel ===== */
@@ -323,4 +328,3 @@
 }
 .inline-color-btn:hover { transform: scale(1.2); }
 .inline-color-btn.active { border-color: var(--text-primary); }
-

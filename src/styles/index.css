@@ -266,6 +266,115 @@ button {
   box-shadow: 0 4px 10px rgba(15, 23, 42, 0.25);
 }
 
+.brush-color-card {
+  margin-bottom: 16px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle);
+  background:
+    radial-gradient(circle at top left, rgba(99,102,241,0.16), transparent 42%),
+    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02)),
+    var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.brush-picker-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.brush-eyedropper-btn {
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.brush-eyedropper-btn:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.brush-eyedropper-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.brush-color-preview-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brush-color-preview {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.22);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+  background: #ffffff;
+}
+
+.brush-color-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.brush-color-meta strong {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.brush-color-meta span {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.brush-hls-canvas {
+  width: min(100%, 260px);
+  height: auto;
+  aspect-ratio: 1 / 1;
+  display: block;
+  margin: 0 auto;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.06);
+  cursor: crosshair;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+  touch-action: none;
+}
+
+.brush-toggle-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.brush-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.brush-toggle input {
+  accent-color: var(--accent);
+}
+
 /* ===== App Layout ===== */
 .app {
   display: flex;
@@ -332,6 +441,16 @@ button {
 .header-btn:hover {
   color: var(--text-primary);
   background: var(--bg-elevated);
+}
+
+.header-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.header-btn:disabled:hover {
+  color: var(--text-secondary);
+  background: transparent;
 }
 
 .icon-btn {
