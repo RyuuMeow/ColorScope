@@ -2394,11 +2394,23 @@ class ColorScopeApp {
       if (history.length > 15) history.pop();
       this._currentHistoryId = id;
 
-      try {
-        localStorage.setItem('colorscope-history', JSON.stringify(history));
-      } catch (e) {
-        history.slice(3).forEach(h => { h.dataURL = ''; });
-        try { localStorage.setItem('colorscope-history', JSON.stringify(history)); } catch {}
+      const saveHistory = (hist) => {
+        try {
+          localStorage.setItem('colorscope-history', JSON.stringify(hist));
+          return true;
+        } catch (e) {
+          return false;
+        }
+      };
+
+      if (!saveHistory(history)) {
+        // Drop dataURL for older items first
+        history.slice(1).forEach(h => { h.dataURL = ''; });
+        if (!saveHistory(history)) {
+          // If still too large, drop the new item's dataURL as well
+          if (history[0]) history[0].dataURL = '';
+          saveHistory(history);
+        }
       }
     } catch (e) { console.warn('Could not save to history:', e); }
   }
@@ -2409,7 +2421,12 @@ class ColorScopeApp {
   }
 
   _setHistory(history) {
-    try { localStorage.setItem('colorscope-history', JSON.stringify(history)); } catch {}
+    try { 
+      localStorage.setItem('colorscope-history', JSON.stringify(history)); 
+    } catch (e) {
+      history.slice(1).forEach(h => { h.dataURL = ''; h.state = null; });
+      try { localStorage.setItem('colorscope-history', JSON.stringify(history)); } catch {}
+    }
   }
 
   _renderHomeGallery() {
@@ -2440,6 +2457,8 @@ class ColorScopeApp {
         if (entry.dataURL) {
           this.imageLoader.fileName = entry.fileName;
           this.imageLoader.loadFromDataURL(entry.dataURL, entry.state);
+        } else {
+          alert('此歷史紀錄的原始圖片因檔案過大而無法完整保存，請重新匯入原圖。\n(The original image was too large to save in history. Please re-import.)');
         }
       });
       grid.appendChild(item);
